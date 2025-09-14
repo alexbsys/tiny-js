@@ -126,6 +126,7 @@ public:
 	bool isStarted() { return thread->isStarted(); }
 	class CScriptThread_t{
 	public:
+    virtual ~CScriptThread_t() = default;
 		virtual void Run()=0;
 		virtual int Stop(bool Wait)=0;
 		virtual bool isActiv()=0;

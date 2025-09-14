@@ -1,4 +1,6 @@
 #include "TinyJS_Threading.h"
+#include <cstdint>
+#include <cstdio>
 
 #undef HAVE_THREADING
 #if !defined(NO_THREADING) && !defined(HAVE_CUSTOM_THREADING_IMPL)
@@ -156,15 +158,15 @@ public:
 		if(Wait) {
 			pthread_join(thread, &retvar);
 		}
-		return (int)retvar;
+		return (int)((intptr_t)retvar);
 	}
-	int retValue() { return (int)retvar; }
+	int retValue() { return (int)((intptr_t)retvar); }
 	bool isActiv() { return activ; }
 	bool isRunning() { return running; }
 	bool isStarted() { return started; }
 	static void *ThreadFnc(CScriptThread_impl *This) {
 		This->running = This->started = true;
-		This->retvar = (void*)This->This->ThreadFnc();
+    This->retvar = (void*)((intptr_t)This->This->ThreadFnc());
 		This->running = false;
 		This->This->ThreadFncFinished();
 		return This->retvar;

@@ -76,7 +76,7 @@ fixed_size_allocator::~fixed_size_allocator()
 #	ifndef LOG_POOL_ALLOCATOR_MEMORY_USAGE
 	if(refs) {
 #	endif
-	fprintf(stderr, "allocator [%s](%d) destroyed\n", name.c_str(), object_size);
+  fprintf(stderr, "allocator [%s](%d) destroyed\n", name.c_str(), static_cast<int>(object_size));
 	fprintf(stderr, "  allocs:%i, ", allocs);
 	fprintf(stderr, "frees:%i, ", frees);
 	fprintf(stderr, "max:%i, ", max);
