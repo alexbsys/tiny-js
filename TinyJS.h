@@ -1189,15 +1189,15 @@ extern Infinity InfinityNegative;
 
 class CNumber {
 private:
-	enum NType {
-		tnNULL, tInt32, tDouble, tNaN, tInfinity
+  enum NType {
+    tnNULL, tInt64, tDouble, tNaN, tInfinity
 	};
-	CNumber(NType Type, int32_t InfinitySign=0) : type(Type) { Int32 = InfinitySign; }
+  CNumber(NType Type, int64_t InfinitySign=0) : type(Type) { Int64 = InfinitySign; }
 public:
 
 	CNumber(const CNumber &Copy) { *this=Copy; }
 
-	CNumber(int32_t Value=0) : type(tInt32) { Int32=Value; }
+  CNumber(int64_t Value=0) : type(tInt64) { Int64=Value; }
 #if 1
 	template<typename T>CNumber(T Value) { *this = Value; }
 #else
@@ -1210,23 +1210,26 @@ public:
 	CNumber(const char *Value) { *this = Value; }
 	CNumber(const std::string &Value) { *this = Value; }
 #endif
-	CNumber &operator=(NegativeZero_t) { type=tnNULL; Int32=0; return *this; }
-	CNumber &operator=(NaN_t) { type=tNaN; Int32=0; return *this; }
-	CNumber &operator=(Infinity v) { type=tInfinity; Int32=v.Sig(); return *this; }
-	CNumber &operator=(int32_t Value) { type=tInt32; Int32=Value; return *this; }
-	CNumber &operator=(uint32_t Value) { 
-		if(Value<=(uint32_t)std::numeric_limits<int32_t>::max()) 
-			type=tInt32, Int32=int32_t(Value);
+  CNumber &operator=(NegativeZero_t) { type=tnNULL; Int64=0; return *this; }
+  CNumber &operator=(NaN_t) { type=tNaN; Int64=0; return *this; }
+  CNumber &operator=(Infinity v) { type=tInfinity; Int64=v.Sig(); return *this; }
+  CNumber &operator=(int64_t Value) { type=tInt64; Int64=Value; return *this; }
+  CNumber &operator=(uint64_t Value) {
+    if(Value<=(uint64_t)std::numeric_limits<int64_t>::max())
+      type=tInt64, Int64=int64_t(Value);
 		else
 			type=tDouble, Double=Value; 
 		return *this; 
 	}
-	CNumber &operator=(double Value);
-	CNumber &operator=(unsigned char Value) { type=tInt32; Int32=Value; return *this; }
+  CNumber &operator=(int32_t Value) { type=tInt64; Int64=Value; return *this; }
+  CNumber &operator=(uint32_t Value) { type=tInt64; Int64=int64_t(Value); return *this; }
+
+  CNumber &operator=(double Value);
+  CNumber &operator=(unsigned char Value) { type=tInt64; Int64=Value; return *this; }
 	CNumber &operator=(const char *Value);
 	CNumber &operator=(const std::string &Value) { return operator=(Value.c_str());}
 
-	int32_t parseInt(const char *str, int32_t radix=0, const char **endptr=0);
+  int64_t parseInt(const char *str, int32_t radix=0, const char **endptr=0);
 	void parseInt(const std::string &str, int32_t radix=0) { parseInt(str.c_str(), radix); }
 	void parseFloat(const char *str, const char **endptr=0);
 	void parseFloat(const std::string &str) { parseFloat(str.c_str()); }
@@ -1254,12 +1257,12 @@ public:
 	bool equal(const CNumber &Value) const;
 
 
-	bool isInt32() const { return type == tInt32; }
+  bool isInt32() const { return type == tInt64; }
 	bool isDouble() const { return type == tDouble; }
 
 	bool isNaN() const { return type == tNaN; }
-	int isInfinity() const { return type == tInfinity ? Int32 : 0; }
-	bool isFinite() const { return type == tInt32 || type == tDouble || type == tnNULL; }
+  int isInfinity() const { return type == tInfinity ? Int64 : 0; }
+  bool isFinite() const { return type == tInt64 || type == tDouble || type == tnNULL; }
 	bool isNegativeZero() const { return type==tnNULL; }
 	bool isZero() const; ///< is 0, -0
 	bool isInteger() const;
@@ -1267,14 +1270,18 @@ public:
 
 	int32_t		toInt32() const { return cast<int32_t>(); }
 	uint32_t		toUInt32() const { return cast<uint32_t>(); }
-	double		toDouble() const;
+
+  int64_t		toInt64() const { return cast<int64_t>(); }
+  uint64_t		toUInt64() const { return cast<uint64_t>(); }
+
+  double		toDouble() const;
 	bool			toBoolean() const { return !isZero() && type!=tNaN; }
 	std::string	toString(uint32_t Radix=10) const;
 private:
 	template<typename T> T cast() const { 
-		switch(type) {
-		case tInt32:
-			return T(Int32);
+    switch(type) {
+    case tInt64:
+      return T(Int64);
 		case tDouble:
 			return T(Double);
 		default:
@@ -1283,7 +1290,7 @@ private:
 	}
 	NType type;
 	union {
-		int32_t	Int32;
+    int64_t	Int64;
 		double	Double;
 	};
 };
@@ -1347,10 +1354,12 @@ private:
 };
 define_newScriptVar_Fnc(Number, CTinyJS *Context, const CNumber &Obj);
 inline define_newScriptVar_NamedFnc(Number, CTinyJS *Context, const CNumber &Obj) { return new CScriptVarNumber(Context, Obj); }
-inline define_newScriptVar_Fnc(Number, CTinyJS *Context, unsigned int Obj) { return newScriptVarNumber(Context, CNumber(Obj)); }
-inline define_newScriptVar_Fnc(Number, CTinyJS *Context, unsigned long Obj) { return newScriptVarNumber(Context, CNumber((uint32_t)Obj)); }
-inline define_newScriptVar_Fnc(Number, CTinyJS *Context, int Obj) { return newScriptVarNumber(Context, CNumber(Obj)); }
-inline define_newScriptVar_Fnc(Number, CTinyJS *Context, long Obj) { return newScriptVarNumber(Context, CNumber((int32_t)Obj)); }
+inline define_newScriptVar_Fnc(Number, CTinyJS *Context, unsigned int Obj) { return newScriptVarNumber(Context, CNumber((uint64_t)Obj)); }
+//inline define_newScriptVar_Fnc(Number, CTinyJS *Context, unsigned long Obj) { return newScriptVarNumber(Context, CNumber((uint64_t)Obj)); }
+inline define_newScriptVar_Fnc(Number, CTinyJS *Context, uint64_t Obj) { return newScriptVarNumber(Context, CNumber(Obj)); }
+inline define_newScriptVar_Fnc(Number, CTinyJS *Context, int Obj) { return newScriptVarNumber(Context, CNumber((int64_t)Obj)); }
+//inline define_newScriptVar_Fnc(Number, CTinyJS *Context, long Obj) { return newScriptVarNumber(Context, CNumber((int64_t)Obj)); }
+inline define_newScriptVar_Fnc(Number, CTinyJS *Context, int64_t Obj) { return newScriptVarNumber(Context, CNumber(Obj)); }
 inline define_newScriptVar_Fnc(Number, CTinyJS *Context, double Obj) { return newScriptVarNumber(Context, CNumber(Obj)); }
 inline define_DEPRECATED_newScriptVar_Fnc(NaN, CTinyJS *Context, NaN_t) { return newScriptVarNumber(Context, CNumber(NaN)); }
 inline define_DEPRECATED_newScriptVar_Fnc(Infinity, CTinyJS *Context, Infinity Obj) { return newScriptVarNumber(Context, CNumber(Obj)); } 

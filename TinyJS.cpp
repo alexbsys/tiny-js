@@ -44,6 +44,9 @@
 #include <errno.h>
 #include <sstream>
 #include <fstream>
+#include <memory>
+#include <cmath>
+#include <cstdint>
 
 #include "TinyJS.h"
 
@@ -138,7 +141,10 @@ uint32_t isArrayIndex(const string &str) {
 	CNumber idx;
 	const char *endptr;
 	idx.parseInt(str.c_str(), 10, &endptr);
-	if(*endptr || idx>uint32_t(0xFFFFFFFFUL)) return -1;
+
+  if(*endptr || idx.toUInt32() > uint32_t(0xFFFFFFFFUL))
+    return -1;
+
 	return idx.toUInt32();
 }
 inline bool isHexadecimal(char ch) {
@@ -175,6 +181,19 @@ string int2string(int32_t intData) {
 	str << intData;
 	return str.str();
 }
+
+string int2string(int64_t intData) {
+  ostringstream str;
+  str << intData;
+  return str.str();
+}
+
+string int2string(uint64_t intData) {
+  ostringstream str;
+  str << intData;
+  return str.str();
+}
+
 string int2string(uint32_t intData) {
 	ostringstream str;
 	str << intData;
@@ -193,7 +212,7 @@ string float2string(const double &floatData) {
 }
 /// convert the given string into a quoted string suitable for javascript
 string getJSString(const string &str) {
-	char buffer[5] = "\\x00";
+    char buffer[7] = "\\u0000";
 	string nStr; nStr.reserve(str.length());
 	nStr.push_back('\"');
 	for (string::const_iterator i=str.begin();i!=str.end();i++) {
@@ -210,10 +229,10 @@ string getJSString(const string &str) {
 			case '"': replaceWith = "\\\""; break;
 			default: {
 					int nCh = ((unsigned char)*i) & 0xff;
-					if(nCh<32 || nCh>127) {
+                    if (nCh<32 /*|| nCh>127*/) {
 						static char hex[] = "0123456789ABCDEF";
-						buffer[2] = hex[(nCh>>4)&0x0f];
-						buffer[3] = hex[nCh&0x0f];
+                        buffer[4] = hex[(nCh>>4)&0x0f];
+                        buffer[5] = hex[nCh&0x0f];
 						replaceWith = buffer;
 					};
 				}
@@ -228,8 +247,8 @@ string getJSString(const string &str) {
 }
 
 static inline string getIDString(const string& str) {
-	if(isIDString(str.c_str()) && CScriptToken::isReservedWord(str)==LEX_ID)
-		return str;
+//	if(isIDString(str.c_str()) && CScriptToken::isReservedWord(str)==LEX_ID)
+//		return str;
 	return getJSString(str);
 }
 
@@ -253,7 +272,8 @@ string CScriptException::toString() {
 //////////////////////////////////////////////////////////////////////////
 
 CScriptLex::CScriptLex(const char *Code, const string &File, int Line, int Column) : data(Code) {
-	currentFile = File;
+  (void)Column;
+  currentFile = File;
 	pos.currentLineStart = pos.tokenStart = data;
 	pos.currentLine = Line;
 	reset(pos);
@@ -603,6 +623,9 @@ std::string CScriptTokenDataForwards::addLets( STRING_VECTOR_t &Lets )
 std::string CScriptTokenDataLoop::getParsableString(const string &IndentString/*=""*/, const string &Indent/*=""*/ ) {
 	static const char *heads[] = {"for each(", "for(", "for(", "for(", "while(", "do "};
 	static const char *ops[] = {" in ", " in ", " of ", "; "};
+  (void)IndentString;
+  (void)Indent;
+
 	string out = heads[type];
 	if(init.size() && type==FOR)out.append(CScriptToken::getParsableString(init));
 	if(type<=WHILE) out.append(CScriptToken::getParsableString(condition.begin(), condition.end()-(type>=FOR ? 0 : 7)));
@@ -1089,8 +1112,8 @@ void CScriptTokenizer::tokenizeCode(CScriptLex &Lexer) {
 		tokenScopeStack.clear();
 		ScriptTokenState state;
 		pushForwarder(state);
-		if(l->tk == '§') { // special-Token at Start means the code begins not at Statement-Level
-			l->match('§');
+		if((uint8_t)l->tk == 0xA7) { // special-Token at Start means the code begins not at Statement-Level
+			l->match((char)0xA7);
 			tokenizeLiteral(state, 0);
 		} else do {
 			tokenizeStatement(state, 0);
@@ -1743,7 +1766,7 @@ void CScriptTokenizer::_tokenizeLiteralObject(ScriptTokenState &State, int Flags
 			l->match(LEX_ID, LEX_STR);
 		if(assign) {
 			l->match(':');
-			int dFlags = Flags | (l->tk == '{' || l->tk == '[') ? TOKENIZE_FLAGS_nestedObject : 0;
+      int dFlags = Flags | ((l->tk == '{' || l->tk == '[') ? TOKENIZE_FLAGS_nestedObject : 0);
 			State.pushLeftHandState();
 			State.Tokens.swap(element.value);
 			tokenizeAssignment(State, dFlags);
@@ -1791,7 +1814,7 @@ void CScriptTokenizer::_tokenizeLiteralArray(ScriptTokenState &State, int Flags)
 		CScriptTokenDataObjectLiteral::ELEMENT element;
 		element.id = int2string(idx++);
 		if(l->tk != ',') {
-			int dFlags = Flags | (l->tk == '{' || l->tk == '[') ? TOKENIZE_FLAGS_nestedObject : 0;
+      int dFlags = Flags | ((l->tk == '{' || l->tk == '[') ? TOKENIZE_FLAGS_nestedObject : 0);
 			State.pushLeftHandState();
 			State.Tokens.swap(element.value);
 			tokenizeAssignment(State, dFlags);
@@ -2358,6 +2381,8 @@ CScriptVarPtr CScriptVar::callJS_toString(CScriptResult &execute, int radix/*=0*
 	return this;
 }
 CScriptVarPtr CScriptVar::toString_CallBack(CScriptResult &execute, int radix/*=0*/) {
+  (void)execute;
+  (void)radix;
 	return this;
 }
 
@@ -2399,6 +2424,7 @@ string CScriptVar::getParsableString() {
 
 string CScriptVar::getParsableString(const string &indentString, const string &indent, uint32_t uniqueID, bool &hasRecursion) {
 	getParsableStringRecursionsCheck();
+  (void)indent;
 	return indentString+toString();
 }
 
@@ -2687,7 +2713,16 @@ void CScriptVar::setArrayIndex(uint32_t idx, const CScriptVarPtr &value) {
 
 uint32_t CScriptVar::getArrayLength() {
 	if (!isArray() || Childs.size()==0) return 0;
-	return isArrayIndex(Childs.back()->getName())+1; 
+  auto it = Childs.end();
+  while(it != Childs.begin()) {
+    it--;
+    CScriptVarLinkPtr& elem = *it;
+    uint32_t idx = isArrayIndex(elem->getName());
+    if (idx != uint32_t(-1))
+      break;
+  }
+
+  return isArrayIndex((*it)->getName())+1;
 }
 
 CScriptVarPtr CScriptVar::mathsOp(const CScriptVarPtr &b, int op) {
@@ -2909,6 +2944,7 @@ CScriptVarPrimitivePtr CScriptVarPrimitive::getRawPrimitive() { return this; }
 bool CScriptVarPrimitive::toBoolean() { return false; }
 CScriptVarPtr CScriptVarPrimitive::toObject() { return this; }
 CScriptVarPtr CScriptVarPrimitive::toString_CallBack( CScriptResult &execute, int radix/*=0*/ ) {
+  (void)execute;
 	return newScriptVar(toCString(radix));
 }
 
@@ -2924,7 +2960,7 @@ CScriptVarPtr CScriptVarUndefined::clone() { return new CScriptVarUndefined(*thi
 bool CScriptVarUndefined::isUndefined() { return true; }
 
 CNumber CScriptVarUndefined::toNumber_Callback() { return NaN; }
-string CScriptVarUndefined::toCString(int radix/*=0*/) { return "undefined"; }
+string CScriptVarUndefined::toCString(int radix/*=0*/) { (void)radix; return "undefined"; }
 string CScriptVarUndefined::getVarType() { return "undefined"; }
 
 
@@ -2939,7 +2975,7 @@ CScriptVarPtr CScriptVarNull::clone() { return new CScriptVarNull(*this); }
 bool CScriptVarNull::isNull() { return true; }
 
 CNumber CScriptVarNull::toNumber_Callback() { return 0; }
-string CScriptVarNull::toCString(int radix/*=0*/) { return "null"; }
+string CScriptVarNull::toCString(int radix/*=0*/) { (void)radix; return "null"; }
 string CScriptVarNull::getVarType() { return "null"; }
 
 
@@ -2948,7 +2984,7 @@ string CScriptVarNull::getVarType() { return "null"; }
 //////////////////////////////////////////////////////////////////////////
 
 CScriptVarString::CScriptVarString(CTinyJS *Context, const string &Data) : CScriptVarPrimitive(Context, Context->stringPrototype), data(Data) {
-	addChild("length", newScriptVar(data.size()), SCRIPTVARLINK_CONSTANT);
+  addChild("length", newScriptVar(static_cast<uint64_t>(data.size())), SCRIPTVARLINK_CONSTANT);
 /*
 	CScriptVarLinkPtr acc = addChild("length", newScriptVar(Accessor), 0);
 	CScriptVarFunctionPtr getter(::newScriptVar(Context, this, &CScriptVarString::native_Length, 0));
@@ -2962,18 +2998,23 @@ bool CScriptVarString::isString() { return true; }
 
 bool CScriptVarString::toBoolean() { return data.length()!=0; }
 CNumber CScriptVarString::toNumber_Callback() { return data.c_str(); }
-string CScriptVarString::toCString(int radix/*=0*/) { return data; }
+string CScriptVarString::toCString(int radix/*=0*/) { (void)radix; return data; }
 
-string CScriptVarString::getParsableString(const string &indentString, const string &indent, uint32_t uniqueID, bool &hasRecursion) { return indentString+getJSString(data); }
+string CScriptVarString::getParsableString(const string &indentString, const string &indent, uint32_t uniqueID, bool &hasRecursion) {
+  (void)indent; (void)uniqueID; (void)hasRecursion;
+  return indentString+getJSString(data);
+}
 string CScriptVarString::getVarType() { return "string"; }
 
 CScriptVarPtr CScriptVarString::toObject() { 
-	CScriptVarPtr ret = newScriptVar(CScriptVarPrimitivePtr(this), context->stringPrototype); 
-	ret->addChild("length", newScriptVar(data.size()), SCRIPTVARLINK_CONSTANT);
+  CScriptVarPtr ret = newScriptVar(CScriptVarPrimitivePtr(this), context->stringPrototype);
+  ret->addChild("length", newScriptVar(static_cast<int>(data.size())), SCRIPTVARLINK_CONSTANT);
 	return ret;
 }
 
 CScriptVarPtr CScriptVarString::toString_CallBack( CScriptResult &execute, int radix/*=0*/ ) {
+  (void)execute;
+  (void)radix;
 	return this;
 }
 
@@ -3008,16 +3049,16 @@ inline bool isNegZero(double d) {
 
 CNumber &CNumber::operator=(double Value) { 
 	double integral;
-	if(isNegZero(Value))
-		type=tnNULL, Int32=0;
-	else if(numeric_limits<double>::has_infinity && Value == numeric_limits<double>::infinity())
-		type=tInfinity, Int32=1; 
-	else if(numeric_limits<double>::has_infinity && Value == -numeric_limits<double>::infinity())
-		type=tInfinity, Int32=-1; 
-	else if(::isNaN(Value) || Value == numeric_limits<double>::quiet_NaN() || Value == std::numeric_limits<double>::signaling_NaN())
-		type=tNaN, Int32=0; 
-	else if(modf(Value, &integral)==0.0 && numeric_limits<int32_t>::min()<=integral && integral<=numeric_limits<int32_t>::max()) 
-		type=tInt32, Int32=int32_t(integral);
+  if(isNegZero(Value))
+    type=tnNULL, Int64=0;
+  else if(numeric_limits<double>::has_infinity && Value == numeric_limits<double>::infinity())
+    type=tInfinity, Int64=1;
+  else if(numeric_limits<double>::has_infinity && Value == -numeric_limits<double>::infinity())
+    type=tInfinity, Int64=-1;
+  else if(::isNaN(Value) || Value == numeric_limits<double>::quiet_NaN() || Value == std::numeric_limits<double>::signaling_NaN())
+    type=tNaN, Int64=0;
+  else if(modf(Value, &integral)==0.0 && numeric_limits<int32_t>::min()<=integral && integral<=numeric_limits<int32_t>::max())
+    type=tInt64, Int64=int32_t(integral);
 	else 
 		type=tDouble, Double=Value; 
 	return *this; 
@@ -3034,12 +3075,12 @@ CNumber &CNumber::operator=(const char *str) {
 	else
 		parseFloat(start, &endptr);
 	while(isWhitespace(*endptr)) endptr++;
-	if(*endptr != '\0')
-		type=tNaN, Int32=0;
+  if(*endptr != '\0')
+    type=tNaN, Int64=0;
 	return *this;
 }
-int32_t CNumber::parseInt(const char * str, int32_t radix/*=0*/, const char **endptr/*=0*/) {
-	type=tInt32, Int32=0;
+int64_t CNumber::parseInt(const char * str, int32_t radix/*=0*/, const char **endptr/*=0*/) {
+  type=tInt64, Int64=0;
 	if(endptr) *endptr = str;
 	bool stripPrefix = false; //< is true if radix==0 or radix==16
 	if(radix == 0) {
@@ -3056,15 +3097,15 @@ int32_t CNumber::parseInt(const char * str, int32_t radix/*=0*/, const char **en
 	else if(*str=='+') str++;
 	if(stripPrefix && *str=='0' && (str[1]=='x' || str[1]=='X')) str+=2, radix=16;
 	else if(stripPrefix && *str=='0' && str[1]>='0' && str[1]<='7') str+=1, radix=8;
-	int32_t max = 0x7fffffff/radix;
+  int64_t max = 0x7fffffffffffffffLL/radix;
 	const char *start = str;
-	for( ; *str; str++) {
-		if(*str >= '0' && *str <= '0'-1+radix) Int32 = Int32*radix+*str-'0';
-		else if(*str>='a' && *str<='a'-11+radix) Int32 = Int32*radix+*str-'a'+10;
-		else if(*str>='A' && *str<='A'-11+radix) Int32 = Int32*radix+*str-'A'+10;
-		else break;
-		if(Int32 >= max) {
-			type=tDouble, Double=double(Int32);
+  for( ; *str; str++) {
+    if(*str >= '0' && *str <= '0'-1+radix) Int64 = Int64*radix+*str-'0';
+    else if(*str>='a' && *str<='a'-11+radix) Int64 = Int64*radix+*str-'a'+10;
+    else if(*str>='A' && *str<='A'-11+radix) Int64 = Int64*radix+*str-'A'+10;
+    else break;
+    if(Int64 >= max) {
+      type=tDouble, Double=double(Int64);
 			for(str++ ; *str; str++) {
 				if(*str >= '0' && *str <= '0'-1+radix) Double = Double *radix+*str-'0';
 				else if(*str>='a' && *str<='a'-11+radix) Double = Double *radix+*str-'a'+10;
@@ -3077,22 +3118,22 @@ int32_t CNumber::parseInt(const char * str, int32_t radix/*=0*/, const char **en
 	if(str == start) {
 		type= tNaN;
 		return 0;
-	}
-	if(sign<0 && ((type==tInt32 && Int32==0) || (type==tDouble && Double==0.0))) { type=tnNULL,Int32=0; return radix; }
-	if(type==tInt32) operator=(sign<0 ? -Int32 : Int32);
+  }
+  if(sign<0 && ((type==tInt64 && Int64==0) || (type==tDouble && Double==0.0))) { type=tnNULL,Int64=0; return radix; }
+  if(type==tInt64) operator=(sign<0 ? -Int64 : Int64);
 	else operator=(sign<0 ? -Double : Double);
 	if(endptr) *endptr = (char*)str;
 	return radix;
 }
 
 void CNumber::parseFloat(const char * str, const char **endptr/*=0*/) {
-	type=tInt32, Int32=0;
+  type=tInt64, Int64=0;
 	if(endptr) *endptr = str;
 	while(isWhitespace(*str)) str++;
 	int sign=1;
 	if(*str=='-') sign=-1,str++;
-	else if(*str=='+') str++;
-	if(strncmp(str, "Infinity", 8) == 0) { type=tInfinity, Int32=sign; return; }
+  else if(*str=='+') str++;
+  if(strncmp(str, "Infinity", 8) == 0) { type=tInfinity, Int64=sign; return; }
 	double d = strtod(str, (char**)endptr);
 	operator=(sign>0 ? d : -d);
 	return;
@@ -3116,35 +3157,35 @@ CNumber CNumber::add(const CNumber &Value) const {
 		return CNumber(toDouble()+Value.toDouble());
 	else {
 		int32_t range_max = numeric_limits<int32_t>::max();
-		int32_t range_min = numeric_limits<int32_t>::min();
-		if(Int32>0) range_max-=Int32;
-		else if(Int32<0) range_min-=Int32;
-		if(range_min<=Value.Int32 && Value.Int32<=range_max)
-			return CNumber(Int32+Value.Int32);
-		else
-			return CNumber(double(Int32)+double(Value.Int32));
+    int32_t range_min = numeric_limits<int32_t>::min();
+    if(Int64>0) range_max-=Int64;
+    else if(Int64<0) range_min-=Int64;
+    if(range_min<=Value.Int64 && Value.Int64<=range_max)
+      return CNumber(Int64+Value.Int64);
+    else
+      return CNumber(double(Int64)+double(Value.Int64));
 	}
 }
 
 CNumber CNumber::operator-() const {
-	switch(type) {
-	case tInt32:
-		if(Int32==0)
+  switch(type) {
+  case tInt64:
+    if(Int64==0)
 			return CNumber(NegativeZero);
-	case tnNULL:
-		return CNumber(-Int32);
+  case tnNULL:
+    return CNumber(-Int64);
 	case tDouble:
 		return CNumber(-Double);
-	case tInfinity:
-		return CNumber(tInfinity, -Int32);
+  case tInfinity:
+    return CNumber(tInfinity, -Int64);
 	default:
 		return CNumber(tNaN);
 	}
 }
 
-static inline int bits(uint32_t Value) {
-	uint32_t b=0, mask=0xFFFF0000UL;
-	for(int shift=16; shift>0 && Value!=0; shift>>=1, mask>>=shift) {
+static inline int bits(uint64_t Value) {
+  uint64_t b=0, mask=0xFFFFFFFFFFFF0000ULL;
+  for(int shift=16+32; shift>0 && Value!=0; shift>>=1, mask>>=shift) {
 		if(Value & mask) {
 			b += shift;
 			Value>>=shift;
@@ -3152,8 +3193,8 @@ static inline int bits(uint32_t Value) {
 	}
 	return b;
 }
-static inline int bits(int32_t Value) {
-	return bits(uint32_t(Value<0?-Value:Value));
+static inline int bits(int64_t Value) {
+  return bits(uint64_t(Value<0?-Value:Value));
 }
 
 CNumber CNumber::multi(const CNumber &Value) const {
@@ -3172,11 +3213,11 @@ CNumber CNumber::multi(const CNumber &Value) const {
 	} else if(type==tDouble || Value.type==tDouble)
 		return CNumber(toDouble()*Value.toDouble());
 	else {
-		// Int32*Int32
-		if(bits(Int32)+bits(Value.Int32) <= 29)
-			return CNumber(Int32*Value.Int32);
-		else
-			return CNumber(double(Int32)*double(Value.Int32));
+    // Int32*Int32
+    if(bits(Int64)+bits(Value.Int64) <= 32+29)
+      return CNumber(Int64*Value.Int64);
+    else
+      return CNumber(double(Int64)*double(Value.Int64));
 	}
 }
 
@@ -3201,13 +3242,13 @@ CNumber CNumber::div( const CNumber &Value ) const {
 CNumber CNumber::modulo( const CNumber &Value ) const {
 	if(type==tNaN || type==tInfinity || Value.type==tNaN || Value.isZero()) return CNumber(tNaN);
 	if(Value.type==tInfinity) return CNumber(*this);
-	if(isZero()) return CNumber(0);
-	if(type==tDouble || Value.type==tDouble || (Int32==numeric_limits<int32_t>::min() && Value == -1) /* use double to prevent integer overflow */ ) {
+  if(isZero()) return CNumber(0);
+  if(type==tDouble || Value.type==tDouble || (Int64==numeric_limits<int32_t>::min() && Value == -1) /* use double to prevent integer overflow */ ) {
 		double n = toDouble(), d = Value.toDouble(), q;
 		modf(n/d, &q);
 		return CNumber(n - (d * q));
-	} else
-		return CNumber(Int32 % Value.Int32);
+  } else
+    return CNumber(Int64 % Value.Int64);
 }
 
 CNumber CNumber::round() const {
@@ -3233,20 +3274,20 @@ CNumber CNumber::abs() const {
 }
 
 CNumber CNumber::shift(const CNumber &Value, bool Right) const {
-	int32_t lhs = toInt32();
-	uint32_t rhs = Value.toUInt32() & 0x1F;
+  int64_t lhs = toInt64();
+  uint64_t rhs = Value.toUInt64() & 0x1F;
 	return CNumber(Right ? lhs>>rhs : lhs<<rhs);
 }
 
 CNumber CNumber::ushift(const CNumber &Value, bool Right) const {
-	uint32_t lhs = toUInt32();
-	uint32_t rhs = Value.toUInt32() & 0x1F;
+  uint64_t lhs = toUInt64();
+  uint64_t rhs = Value.toUInt64() & 0x1F;
 	return CNumber(Right ? lhs>>rhs : lhs<<rhs);
 }
 
 CNumber CNumber::binary(const CNumber &Value, char Mode) const {
-	int32_t lhs = toInt32();
-	int32_t rhs = Value.toInt32();
+  int64_t lhs = toInt64();
+  int64_t rhs = Value.toInt64();
 
 	switch(Mode) {
 	case '&':	lhs&=rhs; break;
@@ -3259,33 +3300,33 @@ CNumber CNumber::binary(const CNumber &Value, char Mode) const {
 
 int CNumber::less( const CNumber &Value ) const {
 	if(type==tNaN || Value.type==tNaN) return 0;
-	else if(type==tInfinity) {
-		if(Value.type==tInfinity) return Int32<Value.Int32 ? 1 : -1;
-		return -Int32;
-	} else if(Value.type==tInfinity) 
-		return Value.Int32;
+  else if(type==tInfinity) {
+    if(Value.type==tInfinity) return Int64<Value.Int64 ? 1 : -1;
+    return -Int64;
+  } else if(Value.type==tInfinity)
+    return Value.Int64;
 	else if(isZero() && Value.isZero()) return -1;
 	else if(type==tDouble || Value.type==tDouble) return toDouble() < Value.toDouble() ? 1 : -1;
-	return toInt32() < Value.toInt32() ? 1 : -1;
+  return toInt64() < Value.toInt64() ? 1 : -1;
 }
 
 bool CNumber::equal( const CNumber &Value ) const {
 	if(type==tNaN || Value.type==tNaN) return false;
-	else if(type==tInfinity) {
-		if(Value.type==tInfinity) return Int32==Value.Int32;
+  else if(type==tInfinity) {
+    if(Value.type==tInfinity) return Int64==Value.Int64;
 		return false;
 	} else if(Value.type==tInfinity) 
 		return false;
 	else if(isZero() && Value.isZero()) return true;
 	else if(type==tDouble || Value.type==tDouble) return toDouble() == Value.toDouble();
-	return toInt32() == Value.toInt32();
+  return toInt64() == Value.toInt64();
 }
 
 bool CNumber::isZero() const
 {
-	switch(type) {
-	case tInt32:
-		return Int32==0;
+  switch(type) {
+  case tInt64:
+    return Int64==0;
 	case tnNULL:
 		return true;
 	case tDouble:
@@ -3298,8 +3339,8 @@ bool CNumber::isZero() const
 bool CNumber::isInteger() const
 {
 	double integral;
-	switch(type) {
-	case tInt32:
+  switch(type) {
+  case tInt64:
 	case tnNULL:
 		return true;
 	case tDouble:
@@ -3310,10 +3351,10 @@ bool CNumber::isInteger() const
 }
 
 int CNumber::sign() const {
-	switch(type) {
-	case tInt32:
-	case tInfinity:
-		return Int32<0?-1:1;
+  switch(type) {
+  case tInt64:
+  case tInfinity:
+    return Int64<0?-1:1;
 	case tnNULL:
 		return -1;
 	case tDouble:
@@ -3322,7 +3363,7 @@ int CNumber::sign() const {
 		return 1;
 	}
 }
-char *tiny_ltoa(int32_t val, unsigned radix) {
+char *tiny_ltoa(int64_t val, unsigned radix) {
 	char *buf, *buf_end, *p, *firstdig, temp;
 	unsigned digval;
 
@@ -3337,7 +3378,7 @@ char *tiny_ltoa(int32_t val, unsigned radix) {
 	}
 
 	do {
-		digval = (unsigned) (val % radix);
+    digval = (unsigned long long) (val % radix);
 		val /= radix;
 		*p++ = (char) (digval + (digval > 9 ? ('a'-10) : '0'));
 		if(p==buf_end) {
@@ -3432,9 +3473,9 @@ std::string CNumber::toString( uint32_t Radix/*=10*/ ) const {
 	char *str;
 	if(2 > Radix || Radix > 36)
 		Radix = 10; // todo error;
-	switch(type) {
-	case tInt32:
-		if( (str = tiny_ltoa(Int32, Radix)) ) {
+  switch(type) {
+  case tInt64:
+    if( (str = tiny_ltoa(Int64, Radix)) ) {
 			string ret(str); free(str);
 			return ret;
 		}
@@ -3457,8 +3498,8 @@ std::string CNumber::toString( uint32_t Radix/*=10*/ ) const {
 			return ret;
 		}
 		break;
-	case tInfinity:
-		return Int32<0?"-Infinity":"Infinity";
+  case tInfinity:
+    return Int64<0?"-Infinity":"Infinity";
 	case tNaN:
 		return "NaN";
 	}
@@ -3469,15 +3510,15 @@ double CNumber::toDouble() const
 {
 	switch(type) {
 	case tnNULL:
-		return -0.0;
-	case tInt32:
-		return double(Int32);
+    return -0.0;
+  case tInt64:
+    return double(Int64);
 	case tDouble:
 		return Double;
 	case tNaN:
 		return std::numeric_limits<double>::quiet_NaN();
-	case tInfinity:
-		return Int32<0 ? -std::numeric_limits<double>::infinity():std::numeric_limits<double>::infinity();
+  case tInfinity:
+    return Int64<0 ? -std::numeric_limits<double>::infinity():std::numeric_limits<double>::infinity();
 	}
 	return 0.0;
 }
@@ -3527,7 +3568,7 @@ bool CScriptVarBool::isBool() { return true; }
 
 bool CScriptVarBool::toBoolean() { return data; }
 CNumber CScriptVarBool::toNumber_Callback() { return data?1:0; }
-string CScriptVarBool::toCString(int radix/*=0*/) { return data ? "true" : "false"; }
+string CScriptVarBool::toCString(int radix/*=0*/) { (void)radix; return data ? "true" : "false"; }
 
 string CScriptVarBool::getVarType() { return "boolean"; }
 
@@ -3622,7 +3663,8 @@ CScriptVarPtr CScriptVarError::clone() { return new CScriptVarError(*this); }
 bool CScriptVarError::isError() { return true; }
 
 CScriptVarPtr CScriptVarError::toString_CallBack(CScriptResult &execute, int radix) {
-	CScriptVarLinkPtr link;
+  (void)radix;
+  CScriptVarLinkPtr link;
 	string name = ERROR_NAME[Error];
 	link = findChildWithPrototypeChain("name"); if(link) name = link->toString(execute);
 	string message; link = findChildWithPrototypeChain("message"); if(link) message = link->toString(execute);
@@ -3680,7 +3722,10 @@ string CScriptVarArray::getParsableString(const string &indentString, const stri
 		string new_indentString = indentString + indent;
 		for (int i=0;i<len;i++) {
 			destination.append(comma); comma = ",";
-			destination.append(nl).append(new_indentString).append(getArrayIndex(i)->getParsableString(new_indentString, indent, uniqueID, hasRecursion));
+
+      uint32_t tempUniqueID = context->allocUniqueID();
+      destination.append(nl).append(new_indentString).append(getArrayIndex(i)->getParsableString(new_indentString, indent, tempUniqueID, hasRecursion));
+      context->freeUniqueID();
 		}
 		destination.append(nl).append(indentString);
 	}
@@ -3688,6 +3733,7 @@ string CScriptVarArray::getParsableString(const string &indentString, const stri
 	return destination;
 }
 CScriptVarPtr CScriptVarArray::toString_CallBack( CScriptResult &execute, int radix/*=0*/ ) {
+  (void)radix;
 	ostringstream destination;
 	if(toStringRecursion) {
 		return newScriptVar("");
@@ -3708,7 +3754,7 @@ CScriptVarPtr CScriptVarArray::toString_CallBack( CScriptResult &execute, int ra
 
 }
 
-void CScriptVarArray::native_Length(const CFunctionsScopePtr &c, void *data) {
+void CScriptVarArray::native_Length(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(newScriptVar(c->getArgument("this")->getArrayLength()));
 }
 
@@ -3736,21 +3782,23 @@ bool CScriptVarRegExp::isRegExp() { return true; }
 //string CScriptVarRegExp::getString() { return "/"+regexp+"/"+flags; }
 //string CScriptVarRegExp::getParsableString(const string &indentString, const string &indent, uint32_t uniqueID, bool &hasRecursion) { return getString(); }
 CScriptVarPtr CScriptVarRegExp::toString_CallBack(CScriptResult &execute, int radix) {
+  (void)execute;
+  (void)radix;
 	return newScriptVar("/"+regexp+"/"+flags);
 }
-void CScriptVarRegExp::native_Global(const CFunctionsScopePtr &c, void *data) {
+void CScriptVarRegExp::native_Global(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(constScriptVar(Global()));
 }
-void CScriptVarRegExp::native_IgnoreCase(const CFunctionsScopePtr &c, void *data) {
+void CScriptVarRegExp::native_IgnoreCase(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(constScriptVar(IgnoreCase()));
 }
-void CScriptVarRegExp::native_Multiline(const CFunctionsScopePtr &c, void *data) {
+void CScriptVarRegExp::native_Multiline(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(constScriptVar(Multiline()));
 }
-void CScriptVarRegExp::native_Sticky(const CFunctionsScopePtr &c, void *data) {
+void CScriptVarRegExp::native_Sticky(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(constScriptVar(Sticky()));
 }
-void CScriptVarRegExp::native_Source(const CFunctionsScopePtr &c, void *data) {
+void CScriptVarRegExp::native_Source(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(newScriptVar(regexp));
 }
 unsigned int CScriptVarRegExp::LastIndex() {
@@ -3782,10 +3830,10 @@ CScriptVarPtr CScriptVarRegExp::exec( const string &Input, bool Test /*= false*/
 			if(Test) return constScriptVar(true);
 
 			CScriptVarArrayPtr retVar = newScriptVar(Array);
-			retVar->addChild("input", newScriptVar(Input));
-			retVar->addChild("index", newScriptVar(match.position()));
-			for(smatch::size_type idx=0; idx<match.size(); idx++)
-				retVar->addChild(int2string(idx), newScriptVar(match[idx].str()));
+      retVar->addChild("input", newScriptVar(Input));
+      retVar->addChild("index", newScriptVar(static_cast<int>(match.position())));
+      for(smatch::size_type idx=0; idx<match.size(); idx++)
+        retVar->addChild(int2string(static_cast<uint64_t>(idx)), newScriptVar(match[idx].str()));
 			return retVar;
 		}
 	}
@@ -3833,7 +3881,7 @@ CScriptVarDefaultIterator::CScriptVarDefaultIterator(CTinyJS *Context, const CSc
 CScriptVarDefaultIterator::~CScriptVarDefaultIterator() {}
 CScriptVarPtr CScriptVarDefaultIterator::clone() { return new CScriptVarDefaultIterator(*this); }
 bool CScriptVarDefaultIterator::isIterator()		{return true;}
-void CScriptVarDefaultIterator::native_next(const CFunctionsScopePtr &c, void *data) {
+void CScriptVarDefaultIterator::native_next(const CFunctionsScopePtr &c, void *) {
 	if(pos==keys.end()) throw constScriptVar(StopIteration);
 	CScriptVarPtr ret, ret0, ret1;
 	if(mode&1) ret0 = newScriptVar(*pos);
@@ -3995,7 +4043,8 @@ string CScriptVarFunction::getParsableString(const string &indentString, const s
 }
 
 CScriptVarPtr CScriptVarFunction::toString_CallBack(CScriptResult &execute, int radix){
-	bool hasRecursion;
+  (void)execute; (void)radix;
+  bool hasRecursion;
 	return newScriptVar(getParsableString("", "  ", 0, hasRecursion));
 }
 
@@ -4086,7 +4135,8 @@ CScriptVarPtr CScriptVarAccessor::clone() { return new CScriptVarAccessor(*this)
 bool CScriptVarAccessor::isAccessor() { return true; }
 bool CScriptVarAccessor::isPrimitive()	{ return false; } 
 string CScriptVarAccessor::getParsableString(const string &indentString, const string &indent, uint32_t uniqueID, bool &hasRecursion) {
-	return "";
+  (void)indentString; (void)indent; (void)uniqueID; (void)hasRecursion;
+  return "";
 }
 string CScriptVarAccessor::getVarType() { return "accessor"; }
 
@@ -4576,7 +4626,7 @@ CScriptVarFunctionNativePtr CTinyJS::addNative(const string &funcDesc, CScriptVa
 		lex.match(LEX_ID);
 	}
 
-	auto_ptr<CScriptTokenDataFnc> pFunctionData(new CScriptTokenDataFnc);
+  std::unique_ptr<CScriptTokenDataFnc> pFunctionData(new CScriptTokenDataFnc);
 	pFunctionData->name = funcName;
 	lex.match('(');
 	while (lex.tk!=')') {
@@ -4930,9 +4980,9 @@ CScriptVarPtr CTinyJS::mathsOp(CScriptResult &execute, const CScriptVarPtr &A, c
 	case '*':			return a->newScriptVar(da*db);
 	case '/':			return a->newScriptVar(da/db);
 	case '%':			return a->newScriptVar(da%db);
-	case '&':			return a->newScriptVar(da.toInt32()&db.toInt32());
-	case '|':			return a->newScriptVar(da.toInt32()|db.toInt32());
-	case '^':			return a->newScriptVar(da.toInt32()^db.toInt32());
+  case '&':			return a->newScriptVar(da.toInt64()&db.toInt64());
+  case '|':			return a->newScriptVar(da.toInt64()|db.toInt64());
+  case '^':			return a->newScriptVar(da.toInt64()^db.toInt64());
 	case '~':			return a->newScriptVar(~da);
 	case LEX_LSHIFT:	return a->newScriptVar(da<<db);
 	case LEX_RSHIFT:	return a->newScriptVar(da>>db);
@@ -6077,10 +6127,10 @@ CScriptVarLinkPtr CTinyJS::findInScopes(const string &childName) {
 /// Object
 //////////////////////////////////////////////////////////////////////////
 
-void CTinyJS::native_Object(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Object(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(c->getArgument(0)->toObject());
 }
-void CTinyJS::native_Object_getPrototypeOf(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Object_getPrototypeOf(const CFunctionsScopePtr &c, void *) {
 	if(c->getArgumentsLength()>=1) {
 		CScriptVarPtr obj = c->getArgument(0);
 		if(obj->isObject()) {
@@ -6130,13 +6180,13 @@ void CTinyJS::native_Object_keys(const CFunctionsScopePtr &c, void *data) {
 		returnVar->setArrayIndex(idx++, newScriptVar(*it));
 }
 
-void CTinyJS::native_Object_getOwnPropertyDescriptor(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Object_getOwnPropertyDescriptor(const CFunctionsScopePtr &c, void *) {
 	CScriptVarPtr obj = c->getArgument(0);
 	if(!obj->isObject()) c->throwError(TypeError, "argument is not an object");
 	c->setReturnVar(obj->getOwnPropertyDescriptor(c->getArgument(1)->toString()));
 }
 
-void CTinyJS::native_Object_defineProperty(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Object_defineProperty(const CFunctionsScopePtr &c, void *) {
 	CScriptVarPtr obj = c->getArgument(0);
 	if(!obj->isObject()) c->throwError(TypeError, "argument is not an object");
 	string name = c->getArgument(1)->toString();
@@ -6179,7 +6229,7 @@ void CTinyJS::native_Object_defineProperties(const CFunctionsScopePtr &c, void *
 /// Object.prototype
 //////////////////////////////////////////////////////////////////////////
 
-void CTinyJS::native_Object_prototype_hasOwnProperty(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Object_prototype_hasOwnProperty(const CFunctionsScopePtr &c, void *) {
 	CScriptVarPtr This = c->getArgument("this");
 	string PropStr = c->getArgument("prop")->toString();
 	CScriptVarLinkPtr Prop = This->findChild(PropStr);
@@ -6193,10 +6243,10 @@ void CTinyJS::native_Object_prototype_hasOwnProperty(const CFunctionsScopePtr &c
 	}
 	c->setReturnVar(c->constScriptVar(res));
 }
-void CTinyJS::native_Object_prototype_valueOf(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Object_prototype_valueOf(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(c->getArgument("this")->valueOf_CallBack());
 }
-void CTinyJS::native_Object_prototype_toString(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Object_prototype_toString(const CFunctionsScopePtr &c, void *) {
 	CScriptResult execute;
 	int radix = 10;
 	if(c->getArgumentsLength()>=1) radix = c->getArgument("radix")->toNumber().toInt32();
@@ -6248,7 +6298,7 @@ void CTinyJS::native_String(const CFunctionsScopePtr &c, void *data) {
 //////////////////////////////////////////////////////////////////////////
 #ifndef NO_REGEXP
 
-void CTinyJS::native_RegExp(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_RegExp(const CFunctionsScopePtr &c, void *) {
 	int arglen = c->getArgumentsLength();
 	string RegExp, Flags;
 	if(arglen>=1) {
@@ -6305,7 +6355,7 @@ void CTinyJS::native_Boolean(const CFunctionsScopePtr &c, void *data) {
 /// Iterator
 //////////////////////////////////////////////////////////////////////////
 
-void CTinyJS::native_Iterator(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Iterator(const CFunctionsScopePtr &c, void *) {
 	if(c->getArgumentsLength()<1) c->throwError(TypeError, "missing argument 0 when calling function Iterator");
 	c->setReturnVar(c->getArgument(0)->toIterator(c->getArgument(1)->toBoolean()?1:3));
 }
@@ -6319,10 +6369,10 @@ void CTinyJS::native_Generator_prototype_next(const CFunctionsScopePtr &c, void 
 	CScriptVarGeneratorPtr Generator(c->getArgument("this"));
 	if(!Generator) {
 		static const char *fnc[] = {"next","send","close","throw"};
-		c->throwError(TypeError, string(fnc[(int)data])+" method called on incompatible Object");
+		c->throwError(TypeError, string(fnc[(int)((intptr_t)data)])+" method called on incompatible Object");
 	}
-	if((int)data >=2)
-		Generator->native_throw(c, (void*)(((int)data)-2));
+	if((int)((uintptr_t)data) >=2)
+    Generator->native_throw(c, (void*)(((intptr_t)data)-2));
 	else
 		Generator->native_send(c, data);
 }
@@ -6333,7 +6383,7 @@ void CTinyJS::native_Generator_prototype_next(const CFunctionsScopePtr &c, void 
 /// Function
 //////////////////////////////////////////////////////////////////////////
 
-void CTinyJS::native_Function(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Function(const CFunctionsScopePtr &c, void *) {
 	int length = c->getArgumentsLength();
 	string params, body;
 	if(length>=1) 
@@ -6349,7 +6399,7 @@ void CTinyJS::native_Function(const CFunctionsScopePtr &c, void *data) {
 	c->setReturnVar(parseFunctionsBodyFromString(params,body));
 }
 
-void CTinyJS::native_Function_prototype_call(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Function_prototype_call(const CFunctionsScopePtr &c, void *) {
 	int length = c->getArgumentsLength();
 	CScriptVarPtr Fnc = c->getArgument("this");
 	if(!Fnc->isFunction()) c->throwError(TypeError, "Function.prototype.call called on incompatible Object");
@@ -6359,7 +6409,7 @@ void CTinyJS::native_Function_prototype_call(const CFunctionsScopePtr &c, void *
 		Args.push_back(c->getArgument(i));
 	c->setReturnVar(callFunction(Fnc, Args, This));
 }
-void CTinyJS::native_Function_prototype_apply(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Function_prototype_apply(const CFunctionsScopePtr &c, void *) {
 	int length=0;
 	CScriptVarPtr Fnc = c->getArgument("this");
 	if(!Fnc->isFunction()) c->throwError(TypeError, "Function.prototype.apply called on incompatible Object");
@@ -6381,7 +6431,7 @@ void CTinyJS::native_Function_prototype_apply(const CFunctionsScopePtr &c, void 
 	}
 	c->setReturnVar(callFunction(Fnc, Args, This));
 }
-void CTinyJS::native_Function_prototype_bind(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_Function_prototype_bind(const CFunctionsScopePtr &c, void *) {
 	int length = c->getArgumentsLength();
 	CScriptVarPtr Fnc = c->getArgument("this");
 	if(!Fnc->isFunction()) c->throwError(TypeError, "Function.prototype.bind called on incompatible Object");
@@ -6407,18 +6457,18 @@ static CScriptVarPtr _newError(CTinyJS *context, ERROR_TYPES type, const CFuncti
 	if(i>3) column		= c->getArgument(3)->toNumber().toInt32();
 	return ::newScriptVarError(context, type, message.c_str(), fileName.c_str(), line, column);
 }
-void CTinyJS::native_Error(const CFunctionsScopePtr &c, void *data) { c->setReturnVar(_newError(this, Error,c)); }
-void CTinyJS::native_EvalError(const CFunctionsScopePtr &c, void *data) { c->setReturnVar(_newError(this, EvalError,c)); }
-void CTinyJS::native_RangeError(const CFunctionsScopePtr &c, void *data) { c->setReturnVar(_newError(this, RangeError,c)); }
-void CTinyJS::native_ReferenceError(const CFunctionsScopePtr &c, void *data){ c->setReturnVar(_newError(this, ReferenceError,c)); }
-void CTinyJS::native_SyntaxError(const CFunctionsScopePtr &c, void *data){ c->setReturnVar(_newError(this, SyntaxError,c)); }
-void CTinyJS::native_TypeError(const CFunctionsScopePtr &c, void *data){ c->setReturnVar(_newError(this, TypeError,c)); }
+void CTinyJS::native_Error(const CFunctionsScopePtr &c, void *) { c->setReturnVar(_newError(this, Error,c)); }
+void CTinyJS::native_EvalError(const CFunctionsScopePtr &c, void *) { c->setReturnVar(_newError(this, EvalError,c)); }
+void CTinyJS::native_RangeError(const CFunctionsScopePtr &c, void *) { c->setReturnVar(_newError(this, RangeError,c)); }
+void CTinyJS::native_ReferenceError(const CFunctionsScopePtr &c, void *){ c->setReturnVar(_newError(this, ReferenceError,c)); }
+void CTinyJS::native_SyntaxError(const CFunctionsScopePtr &c, void *){ c->setReturnVar(_newError(this, SyntaxError,c)); }
+void CTinyJS::native_TypeError(const CFunctionsScopePtr &c, void *){ c->setReturnVar(_newError(this, TypeError,c)); }
 
 ////////////////////////////////////////////////////////////////////////// 
 /// global functions
 //////////////////////////////////////////////////////////////////////////
 
-void CTinyJS::native_eval(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_eval(const CFunctionsScopePtr &c, void *) {
 	string Code = c->getArgument("jsCode")->toString();
 	CScriptVarScopePtr scEvalScope = scopes.back(); // save scope
 	scopes.pop_back(); // go back to the callers scope
@@ -6480,11 +6530,11 @@ void CTinyJS::native_require(const CFunctionsScopePtr &c, void *data) {
 	native_eval(c, data);
 }
 
-void CTinyJS::native_isNAN(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_isNAN(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(constScriptVar(c->getArgument("objc")->toNumber().isNaN()));
 }
 
-void CTinyJS::native_isFinite(const CFunctionsScopePtr &c, void *data) {
+void CTinyJS::native_isFinite(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(constScriptVar(c->getArgument("objc")->toNumber().isFinite()));
 }
 
@@ -6502,9 +6552,10 @@ void CTinyJS::native_parseFloat(const CFunctionsScopePtr &c, void *) {
 
 
 
-void CTinyJS::native_JSON_parse(const CFunctionsScopePtr &c, void *data) {
-	string Code = "§" + c->getArgument("text")->toString();
-	// "§" is a spezal-token - it's for the tokenizer and means the code begins not in Statement-level
+void CTinyJS::native_JSON_parse(const CFunctionsScopePtr &c, void *) {
+	char kSpecialCharacter = static_cast<char>(0xA7);
+  string Code = kSpecialCharacter + c->getArgument("text")->toString();
+	// 0xA7 is a spezal-token - it's for the tokenizer and means the code begins not in Statement-level
 	CScriptVarLinkWorkPtr returnVar;
 	CScriptTokenizer *oldTokenizer = t; t=0;
 	try {
