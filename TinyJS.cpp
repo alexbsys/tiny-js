@@ -326,7 +326,7 @@ void CScriptLex::getNextCh() {
 	}
 }
 
-static uint16_t not_allowed_tokens_befor_regexp[] = {LEX_ID, LEX_INT, LEX_FLOAT, LEX_STR, LEX_R_TRUE, LEX_R_FALSE, LEX_R_NULL, ']', ')', '.', LEX_PLUSPLUS, LEX_MINUSMINUS, LEX_EOF};
+static uint16_t not_allowed_tokens_befor_regexp[] = {LEX_ID, LEX_INT, LEX_BIGINT, LEX_FLOAT, LEX_STR, LEX_R_TRUE, LEX_R_FALSE, LEX_R_NULL, ']', ')', '.', LEX_PLUSPLUS, LEX_MINUSMINUS, LEX_EOF};
 void CScriptLex::getNextToken() {
 	while (currCh && isWhitespace(currCh)) getNextCh();
 	// newline comments
@@ -386,6 +386,13 @@ void CScriptLex::getNextToken() {
 				getNextCh();
 			}
 		}
+
+		// bigint
+		if (tk == LEX_INT && currCh == 'n') {
+			tk = LEX_BIGINT;
+			getNextCh();
+		}
+
 		// do fancy e-style floating point
 		if (!isHex && !isOct && (currCh=='e' || currCh=='E')) {
 			tk = LEX_FLOAT;
@@ -825,6 +832,7 @@ static token2str_t tokens2str_begin[] = {
 	{ LEX_EOF,						"EOF",						false },
 	{ LEX_ID,						"ID",							true  },
 	{ LEX_INT,						"INT",						true  },
+	{ LEX_BIGINT,         "BIGINT",         true  },
 	{ LEX_FLOAT,					"FLOAT",						true  },
 	{ LEX_STR,						"STRING",					true  },
 	{ LEX_REGEXP,					"REGEXP",					true  },
@@ -893,16 +901,20 @@ static bool tokens2str_sort() {
 }
 static bool tokens2str_sorted = tokens2str_sort();
 
-CScriptToken::CScriptToken(CScriptLex *l, int Match, int Alternate) : line(l->currentLine()), column(l->currentColumn()), token(l->tk), intData(0)
+CScriptToken::CScriptToken(CScriptLex *l, int Match, int Alternate) : line(l->currentLine()), column(l->currentColumn()), token(l->tk), int64Data(0)
 {
-	if(token == LEX_INT || LEX_TOKEN_DATA_FLOAT(token)) {
+	if(token == LEX_INT || token == LEX_BIGINT || LEX_TOKEN_DATA_FLOAT(token)) {
 		CNumber number(l->tkStr);
-		if(number.isInfinity())
+		if (token == LEX_BIGINT) {
+			number.setBigInt(true);
+			int64Data = number.toInt64();
+		} else if(number.isInfinity())
 			token=LEX_ID, (tokenData=new CScriptTokenDataString("Infinity"))->ref();
-		else if(number.isInt32())
-			token=LEX_INT, intData=number.toInt32();
-		else
-			token=LEX_FLOAT, floatData=new double(number.toDouble());
+		else if (number.isInt32() && token != LEX_BIGINT) {
+			token = LEX_INT, intData = number.toInt32();
+		} else {
+			token = LEX_FLOAT, floatData = new double(number.toDouble());
+		}
 	} else if(LEX_TOKEN_DATA_STRING(token))
 		(tokenData = new CScriptTokenDataString(l->tkStr))->ref();
 	else if(LEX_TOKEN_DATA_FUNCTION(token))
@@ -919,7 +931,30 @@ CScriptToken::CScriptToken(CScriptLex *l, int Match, int Alternate) : line(l->cu
 	token_str = getTokenStr(token);
 #endif
 }
-CScriptToken::CScriptToken(uint16_t Tk, int IntData) : line(0), column(0), token(Tk), intData(0) {
+
+CScriptToken::CScriptToken(uint16_t Tk, int64_t Int64Data) : line(0), column(0), token(Tk), int64Data(0) {
+	if (LEX_TOKEN_DATA_SIMPLE(token))
+		int64Data = Int64Data;
+	else if (LEX_TOKEN_DATA_FUNCTION(token))
+		(tokenData = new CScriptTokenDataFnc)->ref();
+	else if (LEX_TOKEN_DATA_DESTRUCTURING_VAR(token))
+		(tokenData = new CScriptTokenDataDestructuringVar)->ref();
+	else if (LEX_TOKEN_DATA_OBJECT_LITERAL(token))
+		(tokenData = new CScriptTokenDataObjectLiteral)->ref();
+	else if (LEX_TOKEN_DATA_LOOP(token))
+		(tokenData = new CScriptTokenDataLoop)->ref();
+	else if (LEX_TOKEN_DATA_TRY(token))
+		(tokenData = new CScriptTokenDataTry)->ref();
+	else if (LEX_TOKEN_DATA_FORWARDER(token))
+		(tokenData = new CScriptTokenDataForwards)->ref();
+	else
+		ASSERT(0);
+#ifdef _DEBUG
+	token_str = getTokenStr(token);
+#endif
+}
+
+CScriptToken::CScriptToken(uint16_t Tk, int IntData) : line(0), column(0), token(Tk), int64Data(0) {
 	if (LEX_TOKEN_DATA_SIMPLE(token))
 		intData = IntData;
 	else if (LEX_TOKEN_DATA_FUNCTION(token))
@@ -941,7 +976,7 @@ CScriptToken::CScriptToken(uint16_t Tk, int IntData) : line(0), column(0), token
 #endif
 }
 
-CScriptToken::CScriptToken(uint16_t Tk, const string &TkStr) : line(0), column(0), token(Tk), intData(0) {
+CScriptToken::CScriptToken(uint16_t Tk, const string &TkStr) : line(0), column(0), token(Tk), int64Data(0) {
 	ASSERT(LEX_TOKEN_DATA_STRING(token));
 	(tokenData = new CScriptTokenDataString(TkStr))->ref();
 #ifdef _DEBUG
@@ -964,7 +999,7 @@ CScriptToken &CScriptToken::operator =(const CScriptToken &Copy)
 	else if(!LEX_TOKEN_DATA_SIMPLE(token))
 		(tokenData = Copy.tokenData)->ref();
 	else
-		intData	= Copy.intData;
+		int64Data	= Copy.int64Data;
 	return *this;
 }
 string CScriptToken::getParsableString(TOKEN_VECT &Tokens, const string &IndentString, const string &Indent) {
@@ -989,9 +1024,14 @@ string CScriptToken::getParsableString(TOKEN_VECT_it Begin, TOKEN_VECT_it End, c
 			OutString.append(it->String()), need_space=true;
 		else if(LEX_TOKEN_DATA_FLOAT(it->token))
 			OutString.append(CNumber(it->Float()).toString()), need_space=true;
-		else if(it->token == LEX_INT)
-			OutString.append(CNumber(it->Int()).toString()), need_space=true;
-		else if(LEX_TOKEN_DATA_FUNCTION(it->token)) {
+		else if (it->token == LEX_INT) {
+			CNumber num(it->Int());
+			OutString.append(num.toString()), need_space = true;			
+		} else if (it->token == LEX_BIGINT) {
+			CNumber num(it->Int64());
+			num.setBigInt(true);
+			OutString.append(num.toString()), need_space = true;
+		} else if (LEX_TOKEN_DATA_FUNCTION(it->token)) {
 			OutString.append("function ");
 			if(it->Fnc().name.size() )
 				OutString.append(it->Fnc().name);
@@ -1750,9 +1790,11 @@ void CScriptTokenizer::_tokenizeLiteralObject(ScriptTokenState &State, int Flags
 				} else
 					assign = true;
 			}
-		} else if(l->tk == LEX_INT) {
+		} else if(l->tk == LEX_INT || l->tk == LEX_BIGINT) {
 			element.id = int2string((int32_t)strtol(l->tkStr.c_str(),0,0)); 
-			l->match(LEX_INT);
+			if (l->tk == LEX_INT)
+				l->match(LEX_INT);
+			else l->match(LEX_BIGINT);
 			assign = true;
 		} else if(l->tk == LEX_FLOAT) {
 			element.id = float2string(strtod(l->tkStr.c_str(),0)); 
@@ -1865,6 +1907,7 @@ void CScriptTokenizer::tokenizeLiteral(ScriptTokenState &State, int Flags) {
 		}
 		break;
 	case LEX_INT:
+	case LEX_BIGINT:
 	case LEX_FLOAT:
 	case LEX_STR:
 	case LEX_REGEXP:
@@ -3160,8 +3203,12 @@ CNumber CNumber::add(const CNumber &Value) const {
     int32_t range_min = numeric_limits<int32_t>::min();
     if(Int64>0) range_max-=Int64;
     else if(Int64<0) range_min-=Int64;
-    if(range_min<=Value.Int64 && Value.Int64<=range_max)
-      return CNumber(Int64+Value.Int64);
+		if (range_min <= Value.Int64 && Value.Int64 <= range_max) {
+			CNumber num(Int64 + Value.Int64);
+			if (isBigInt() || Value.isBigInt())
+				num.setBigInt(true);
+			return num;
+		}
     else
       return CNumber(double(Int64)+double(Value.Int64));
 	}
@@ -3172,8 +3219,12 @@ CNumber CNumber::operator-() const {
   case tInt64:
     if(Int64==0)
 			return CNumber(NegativeZero);
-  case tnNULL:
-    return CNumber(-Int64);
+	case tnNULL: {
+		CNumber num(-Int64);
+		if (isBigInt())
+			num.setBigInt(true);
+		return num;
+	}
 	case tDouble:
 		return CNumber(-Double);
   case tInfinity:
@@ -3214,9 +3265,12 @@ CNumber CNumber::multi(const CNumber &Value) const {
 		return CNumber(toDouble()*Value.toDouble());
 	else {
     // Int32*Int32
-    if(bits(Int64)+bits(Value.Int64) <= 32+29)
-      return CNumber(Int64*Value.Int64);
-    else
+		if (bits(Int64) + bits(Value.Int64) <= 32 + 29) {
+			CNumber num(Int64 * Value.Int64);
+			if (isBigInt() || Value.isBigInt())
+				num.setBigInt(true);
+			return num;
+		} else
       return CNumber(double(Int64)*double(Value.Int64));
 	}
 }
@@ -3247,8 +3301,12 @@ CNumber CNumber::modulo( const CNumber &Value ) const {
 		double n = toDouble(), d = Value.toDouble(), q;
 		modf(n/d, &q);
 		return CNumber(n - (d * q));
-  } else
-    return CNumber(Int64 % Value.Int64);
+	} else {
+		CNumber num(Int64 % Value.Int64);
+		if (isBigInt() || Value.isBigInt())
+			num.setBigInt(true);
+		return num;
+	}
 }
 
 CNumber CNumber::round() const {
@@ -3276,13 +3334,19 @@ CNumber CNumber::abs() const {
 CNumber CNumber::shift(const CNumber &Value, bool Right) const {
   int64_t lhs = toInt64();
   uint64_t rhs = Value.toUInt64() & 0x1F;
-	return CNumber(Right ? lhs>>rhs : lhs<<rhs);
+	CNumber num(Right ? lhs>>rhs : lhs<<rhs);
+	if (isBigInt())
+		num.setBigInt(true);
+	return num;
 }
 
 CNumber CNumber::ushift(const CNumber &Value, bool Right) const {
   uint64_t lhs = toUInt64();
   uint64_t rhs = Value.toUInt64() & 0x1F;
-	return CNumber(Right ? lhs>>rhs : lhs<<rhs);
+	CNumber num(Right ? lhs>>rhs : lhs<<rhs);
+	if (isBigInt())
+		num.setBigInt(true);
+	return num;
 }
 
 CNumber CNumber::binary(const CNumber &Value, char Mode) const {
@@ -5100,10 +5164,20 @@ CScriptVarLinkWorkPtr CTinyJS::execute_literals(CScriptResult &execute) {
 		t->match(LEX_ID);
 		break;
 	case LEX_INT:
+	case LEX_BIGINT:
 		{
-			CScriptVarPtr a = newScriptVar(t->getToken().Int());
-			a->setExtensible(false);
-			t->match(LEX_INT);
+		  CScriptVarPtr a;
+			if (t->tk == LEX_INT) {
+				a = newScriptVar(t->getToken().Int());
+				a->setExtensible(false);
+				t->match(LEX_INT);
+			}
+			else {//LEX_BIGIN
+				a = newScriptVar(t->getToken().Int64());
+				a->setExtensible(false);
+				t->match(LEX_BIGINT);
+			}
+
 			return a;
 		}
 		break;

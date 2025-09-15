@@ -99,6 +99,7 @@ enum LEX_TYPES {
 	LEX_ANDAND,
 	LEX_OROR,
 	LEX_INT,
+	LEX_BIGINT,
 
 #define LEX_ASSIGNMENTS_BEGIN LEX_PLUSEQUAL
 	LEX_PLUSEQUAL,
@@ -494,15 +495,17 @@ class CScriptTokenizer;
 class CScriptToken : public fixed_size_object<CScriptToken>
 {
 public:
-	CScriptToken() : line(0), column(0), token(0), intData(0) {}
+	CScriptToken() : line(0), column(0), token(0), int64Data(0) {}
 	CScriptToken(CScriptLex *l, int Match=-1, int Alternate=-1);
 	CScriptToken(uint16_t Tk, int IntData=0);
+	CScriptToken(uint16_t Tk, int64_t Int64Data);
 	CScriptToken(uint16_t Tk, const std::string &TkStr);
 	CScriptToken(const  CScriptToken &Copy) : token(0) { *this = Copy; }
 	CScriptToken &operator =(const CScriptToken &Copy);
 	~CScriptToken() { clear(); }
 
 	int &Int() { ASSERT(LEX_TOKEN_DATA_SIMPLE(token)); return intData; }
+	int64_t& Int64() { ASSERT(LEX_TOKEN_DATA_SIMPLE(token)); return int64Data; }
 	std::string &String() { ASSERT(LEX_TOKEN_DATA_STRING(token)); return dynamic_cast<CScriptTokenDataString*>(tokenData)->tokenStr; }
 	double &Float() { ASSERT(LEX_TOKEN_DATA_FLOAT(token)); return *floatData; }
 	CScriptTokenDataFnc &Fnc() { ASSERT(LEX_TOKEN_DATA_FUNCTION(token)); return *dynamic_cast<CScriptTokenDataFnc*>(tokenData); }
@@ -529,6 +532,7 @@ private:
 	void clear();
 	union {
 		int										intData;
+		int64_t               int64Data;
 		double									*floatData;
 		CScriptTokenData						*tokenData;
 	};
@@ -1197,7 +1201,11 @@ public:
 
 	CNumber(const CNumber &Copy) { *this=Copy; }
 
-  CNumber(int64_t Value=0) : type(tInt64) { Int64=Value; }
+  CNumber(int64_t Value=0) : type(tInt64) { 
+		Int64=Value; 
+	  if (Int64 > std::numeric_limits<int32_t>::max() || Int64 < std::numeric_limits<int32_t>::min())
+		  setBigInt(true);
+	}
 #if 1
 	template<typename T>CNumber(T Value) { *this = Value; }
 #else
@@ -1234,6 +1242,9 @@ public:
 	void parseFloat(const char *str, const char **endptr=0);
 	void parseFloat(const std::string &str) { parseFloat(str.c_str()); }
 
+	void setBigInt(bool bigInt) { this->bigInt = bigInt; }
+	bool isBigInt() const { return this->bigInt; }
+
 	CNumber add(const CNumber &Value) const;
 	CNumber operator-() const;
 	CNumber operator~() const { if(type==tNaN) return *this; else return ~toInt32(); }
@@ -1251,7 +1262,6 @@ public:
 	CNumber ushift(const CNumber &Value, bool right=true) const;
 
 	CNumber binary(const CNumber &Value, char Mode) const;
-
 
 	int less(const CNumber &Value) const;
 	bool equal(const CNumber &Value) const;
@@ -1271,8 +1281,18 @@ public:
 	int32_t		toInt32() const { return cast<int32_t>(); }
 	uint32_t		toUInt32() const { return cast<uint32_t>(); }
 
-  int64_t		toInt64() const { return cast<int64_t>(); }
-  uint64_t		toUInt64() const { return cast<uint64_t>(); }
+  int64_t		toInt64() const { 
+		if (bigInt)
+			return cast<int64_t>();
+		else
+			return cast<int32_t>();
+	}
+  uint64_t		toUInt64() const { 
+		if (bigInt)
+			return cast<uint64_t>();
+		else
+			return cast<uint32_t>();
+	}
 
   double		toDouble() const;
 	bool			toBoolean() const { return !isZero() && type!=tNaN; }
@@ -1289,8 +1309,10 @@ private:
 		}
 	}
 	NType type;
+	bool bigInt = false;
 	union {
     int64_t	Int64;
+		int32_t Int32;
 		double	Double;
 	};
 };
@@ -1357,9 +1379,17 @@ inline define_newScriptVar_NamedFnc(Number, CTinyJS *Context, const CNumber &Obj
 inline define_newScriptVar_Fnc(Number, CTinyJS *Context, unsigned int Obj) { return newScriptVarNumber(Context, CNumber((uint64_t)Obj)); }
 //inline define_newScriptVar_Fnc(Number, CTinyJS *Context, unsigned long Obj) { return newScriptVarNumber(Context, CNumber((uint64_t)Obj)); }
 inline define_newScriptVar_Fnc(Number, CTinyJS *Context, uint64_t Obj) { return newScriptVarNumber(Context, CNumber(Obj)); }
-inline define_newScriptVar_Fnc(Number, CTinyJS *Context, int Obj) { return newScriptVarNumber(Context, CNumber((int64_t)Obj)); }
+inline define_newScriptVar_Fnc(Number, CTinyJS *Context, int Obj) { 
+	CNumber num(Obj);
+	num.setBigInt(false);
+	return newScriptVarNumber(Context, num); 
+}
 //inline define_newScriptVar_Fnc(Number, CTinyJS *Context, long Obj) { return newScriptVarNumber(Context, CNumber((int64_t)Obj)); }
-inline define_newScriptVar_Fnc(Number, CTinyJS *Context, int64_t Obj) { return newScriptVarNumber(Context, CNumber(Obj)); }
+inline define_newScriptVar_Fnc(Number, CTinyJS *Context, int64_t Obj) { 
+	CNumber num(Obj);
+	num.setBigInt(true);
+	return newScriptVarNumber(Context, num); 
+}
 inline define_newScriptVar_Fnc(Number, CTinyJS *Context, double Obj) { return newScriptVarNumber(Context, CNumber(Obj)); }
 inline define_DEPRECATED_newScriptVar_Fnc(NaN, CTinyJS *Context, NaN_t) { return newScriptVarNumber(Context, CNumber(NaN)); }
 inline define_DEPRECATED_newScriptVar_Fnc(Infinity, CTinyJS *Context, Infinity Obj) { return newScriptVarNumber(Context, CNumber(Obj)); } 

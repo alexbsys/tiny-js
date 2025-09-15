@@ -141,7 +141,9 @@ CScriptCondVar::~CScriptCondVar() {
 class CScriptThread_impl : public CScriptThread::CScriptThread_t {
 public:
 	CScriptThread_impl(CScriptThread *_this) : retvar((void*)-1), activ(false), running(false), started(false), This(_this) {}
-	~CScriptThread_impl() {}
+	virtual ~CScriptThread_impl() {
+		pthread_join(thread, &retvar);
+	}
 	void Run() {
 		if(started) return;
 		activ = true;
