@@ -297,7 +297,7 @@ public:
 		const char *tokenStart;
 		int currentLine;
 		const char *currentLineStart;
-		int currentColumn() { return tokenStart-currentLineStart; }
+		int currentColumn() { return static_cast<int>(tokenStart-currentLineStart); }
 	} pos;
 	int currentLine() { return pos.currentLine; }
 	int currentColumn() { return pos.currentColumn(); }
@@ -799,7 +799,7 @@ public:
 	uint32_t getArrayLength(); ///< If this is an array, return the number of items in it (else 0)
 	
 	//////////////////////////////////////////////////////////////////////////
-	int getChildren() { return Childs.size(); } ///< Get the number of children
+	int getChildren() { return static_cast<int>(Childs.size()); } ///< Get the number of children
 	CTinyJS *getContext() { return context; }
 	CScriptVarPtr mathsOp(const CScriptVarPtr &b, int op); ///< do a maths op with another script variable
 
@@ -1168,7 +1168,7 @@ public:
 	virtual CScriptVarPtr toObject();
 	virtual CScriptVarPtr toString_CallBack(CScriptResult &execute, int radix=0);
 
-	uint32_t stringLength() { return data.size(); }
+	uint32_t stringLength() { return static_cast<uint32_t>(data.size()); }
 	int getChar(uint32_t Idx);
 protected:
 	std::string data;
@@ -1226,7 +1226,7 @@ public:
     if(Value<=(uint64_t)std::numeric_limits<int64_t>::max())
       type=tInt64, Int64=int64_t(Value);
 		else
-			type=tDouble, Double=Value; 
+			type=tDouble, Double=static_cast<double>(Value); 
 		return *this; 
 	}
   CNumber &operator=(int32_t Value) { type=tInt64; Int64=Value; return *this; }
@@ -1263,7 +1263,7 @@ public:
 
 	CNumber binary(const CNumber &Value, char Mode) const;
 
-	int less(const CNumber &Value) const;
+	int64_t less(const CNumber &Value) const;
 	bool equal(const CNumber &Value) const;
 
 
@@ -1271,7 +1271,7 @@ public:
 	bool isDouble() const { return type == tDouble; }
 
 	bool isNaN() const { return type == tNaN; }
-  int isInfinity() const { return type == tInfinity ? Int64 : 0; }
+  int isInfinity() const { return type == tInfinity ? static_cast<int>(Int64) : 0; }
   bool isFinite() const { return type == tInt64 || type == tDouble || type == tnNULL; }
 	bool isNegativeZero() const { return type==tnNULL; }
 	bool isZero() const; ///< is 0, -0

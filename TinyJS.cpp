@@ -169,7 +169,7 @@ bool isIDString(const char *s) {
 }
 
 void replace(string &str, char textFrom, const char *textTo) {
-	int sLen = strlen(textTo);
+	int sLen = static_cast<int>(strlen(textTo));
 	size_t p = str.find(textFrom);
 	while (p != string::npos) {
 		str = str.substr(0, p) + textTo + str.substr(p+1);
@@ -1223,7 +1223,7 @@ void CScriptTokenizer::skip(int Tokens) {
 static inline void setTokenSkip(CScriptTokenizer::ScriptTokenState &State) {
 	int tokenBeginIdx = State.Marks.back();
 	State.Marks.pop_back();
-	State.Tokens[tokenBeginIdx].Int() = State.Tokens.size()-tokenBeginIdx;
+	State.Tokens[tokenBeginIdx].Int() = static_cast<int>(State.Tokens.size()) - tokenBeginIdx;
 }
 
 enum {
@@ -1894,14 +1894,14 @@ void CScriptTokenizer::tokenizeLiteral(ScriptTokenState &State, int Flags) {
 			pushToken(State.Tokens);
 			if(l->tk==':' && canLabel) {
 				if(find(State.Labels.begin(), State.Labels.end(), label) != State.Labels.end()) 
-					throw new CScriptException(SyntaxError, "dublicate label '"+label+"'", l->currentFile, l->currentLine(), l->currentColumn()-label.size());
+					throw new CScriptException(SyntaxError, "dublicate label '"+label+"'", l->currentFile, l->currentLine(), l->currentColumn()-static_cast<int>(label.size()));
 				State.Tokens[State.Tokens.size()-1].token = LEX_T_LABEL; // change LEX_ID to LEX_T_LABEL
 				State.Labels.push_back(label);
 			} else if(label=="this") {
 				if( l->tk == '=' || (l->tk >= LEX_ASSIGNMENTS_BEGIN && l->tk <= LEX_ASSIGNMENTS_END) )
-					throw new CScriptException(SyntaxError, "invalid assignment left-hand side", l->currentFile, l->currentLine(), l->currentColumn()-label.size());
+					throw new CScriptException(SyntaxError, "invalid assignment left-hand side", l->currentFile, l->currentLine(), l->currentColumn()-static_cast<int>(label.size()));
 				if( l->tk==LEX_PLUSPLUS || l->tk==LEX_MINUSMINUS )
-					throw new CScriptException(SyntaxError, l->tk==LEX_PLUSPLUS?"invalid increment operand":"invalid decrement operand", l->currentFile, l->currentLine(), l->currentColumn()-label.size());
+					throw new CScriptException(SyntaxError, l->tk==LEX_PLUSPLUS?"invalid increment operand":"invalid decrement operand", l->currentFile, l->currentLine(), l->currentColumn()-static_cast<int>(label.size()));
 			} else
 				State.LeftHand = true;
 		}
@@ -2060,7 +2060,7 @@ void CScriptTokenizer::tokenizeSubExpression(ScriptTokenState &State, int Flags)
 void CScriptTokenizer::tokenizeLogic(ScriptTokenState &State, int Flags, int op /*= LEX_OROR*/, int op_n /*= LEX_ANDAND*/) {
 	op_n ? tokenizeLogic(State, Flags, op_n, 0) : tokenizeSubExpression(State, Flags);
 	if(l->tk==op) {
-		unsigned int marks_count = State.Marks.size();
+		unsigned int marks_count = static_cast<unsigned int>(State.Marks.size());
 		while(l->tk==op) {
 			State.Marks.push_back(pushToken(State.Tokens));
 			op_n ? tokenizeLogic(State, Flags, op_n, 0) : tokenizeSubExpression(State, Flags);
@@ -2207,21 +2207,21 @@ int CScriptTokenizer::pushToken(TOKEN_VECT &Tokens, int Match, int Alternate) {
 		Tokens.push_back(CScriptToken(';')); // inject ';'
 	else
 		Tokens.push_back(CScriptToken(l, Match, Alternate));
-	return Tokens.size()-1;
+	return static_cast<int>(Tokens.size())-1;
 }
 int CScriptTokenizer::pushToken(TOKEN_VECT &Tokens, const CScriptToken &Token) {
-	int ret = Tokens.size();
+	int ret = static_cast<int>(Tokens.size());
 	Tokens.push_back(Token);
 	return ret;
 }
 void CScriptTokenizer::pushForwarder(TOKEN_VECT &Tokens, FORWARDER_VECTOR_t &Forwarders, vector<int> &Marks) {
-	Marks.push_back(Tokens.size());
+	Marks.push_back(static_cast<int>(Tokens.size()));
 	CScriptToken token(LEX_T_FORWARD);
 	Tokens.push_back(token);
 	Forwarders.push_back(token.Forwarder());
 }
 void CScriptTokenizer::pushForwarder(ScriptTokenState &State, bool noMarks/*=false*/) {
-	if(!noMarks) State.Marks.push_back(State.Tokens.size());
+	if(!noMarks) State.Marks.push_back(static_cast<int>(State.Tokens.size()));
 	CScriptToken token(LEX_T_FORWARD);
 	State.Tokens.push_back(token);
 	State.Forwarders.push_back(token.Forwarder());
@@ -3199,18 +3199,30 @@ CNumber CNumber::add(const CNumber &Value) const {
 	else if(type==tDouble || Value.type==tDouble)
 		return CNumber(toDouble()+Value.toDouble());
 	else {
-		int32_t range_max = numeric_limits<int32_t>::max();
-    int32_t range_min = numeric_limits<int32_t>::min();
-    if(Int64>0) range_max-=Int64;
-    else if(Int64<0) range_min-=Int64;
-		if (range_min <= Value.Int64 && Value.Int64 <= range_max) {
-			CNumber num(Int64 + Value.Int64);
-			if (isBigInt() || Value.isBigInt())
+		if (isBigInt() || Value.isBigInt()) {
+			int64_t range_max = numeric_limits<int64_t>::max();
+			int64_t range_min = numeric_limits<int64_t>::min();
+			if (Int64 > 0) range_max -= Int64;
+			else if (Int64 < 0) range_min -= Int64;
+			if (range_min <= Value.Int64 && Value.Int64 <= range_max) {
+				CNumber num(Int64 + Value.Int64);
 				num.setBigInt(true);
-			return num;
+				return num;
+			} else {
+				return CNumber(double(Int64) + double(Value.Int64));
+			}
+		} else {  // not bigint
+			int32_t range_max = numeric_limits<int32_t>::max();
+			int32_t range_min = numeric_limits<int32_t>::min();
+			if (Int64 > 0) range_max -= static_cast<int32_t>(Int64);
+			else if (Int64 < 0) range_min -= static_cast<int32_t>(Int64);
+			if (range_min <= Value.Int64 && Value.Int64 <= range_max) {
+				CNumber num(static_cast<int32_t>(Int64) + static_cast<int32_t>(Value.Int64));
+				return num;
+			} else {
+				return CNumber(double(Int64) + double(Value.Int64));
+			}
 		}
-    else
-      return CNumber(double(Int64)+double(Value.Int64));
 	}
 }
 
@@ -3242,7 +3254,7 @@ static inline int bits(uint64_t Value) {
 			Value>>=shift;
 		}
 	}
-	return b;
+	return static_cast<int>(b);
 }
 static inline int bits(int64_t Value) {
   return bits(uint64_t(Value<0?-Value:Value));
@@ -3362,7 +3374,7 @@ CNumber CNumber::binary(const CNumber &Value, char Mode) const {
 }
 
 
-int CNumber::less( const CNumber &Value ) const {
+int64_t CNumber::less( const CNumber &Value ) const {
 	if(type==tNaN || Value.type==tNaN) return 0;
   else if(type==tInfinity) {
     if(Value.type==tInfinity) return Int64<Value.Int64 ? 1 : -1;
@@ -3890,7 +3902,7 @@ CScriptVarPtr CScriptVarRegExp::exec( const string &Input, bool Test /*= false*/
 		if(offset) mflag |= regex_constants::match_prev_avail;
 		smatch match;
 		if(regex_search(Input.begin()+offset, Input.end(), match, regex(regexp, flags), mflag) ) {
-			LastIndex(offset+match.position()+match.str().length());
+			LastIndex(static_cast<int>(offset+match.position()+match.str().length()));
 			if(Test) return constScriptVar(true);
 
 			CScriptVarArrayPtr retVar = newScriptVar(Array);
@@ -4741,8 +4753,8 @@ CScriptVarPtr CTinyJS::callFunction(CScriptResult &execute, const CScriptVarFunc
 	CScriptVarPtr arguments = functionRoot->addChild(TINYJS_ARGUMENTS_VAR, newScriptVar(Object));
 
 	CScriptResult function_execute;
-	int length_proto = Fnc->arguments.size();
-	int length_arguments = Arguments.size();
+	int length_proto = static_cast<int>(Fnc->arguments.size());
+	int length_arguments = static_cast<int>(Arguments.size());
 	int length = max(length_proto, length_arguments);
 	for(int arguments_idx = 0; arguments_idx<length; ++arguments_idx) {
 		string arguments_idx_str = int2string(arguments_idx);
@@ -4825,7 +4837,7 @@ void CTinyJS::generator_start(CScriptVarGenerator *Generator)
 	stackBase = 0;
 
 	// safe callers ScopeSize
-	Generator->callersScopeSize = scopes.size();
+	Generator->callersScopeSize = static_cast<int>(scopes.size());
 
 	// safe callers Tokenizer & set generators one
 	Generator->callersTokenizer = t;
@@ -4942,7 +4954,7 @@ CScriptVarPtr CTinyJS::generator_yield(CScriptResult &execute, CScriptVar *Yield
 		stackBase = generatorStckBase;
 
 		// safe callers and restore generator Scopes
-		Generator->callersScopeSize = scopes.size();
+		Generator->callersScopeSize = static_cast<int>(scopes.size());
 		scopes.insert(scopes.end(), Generator->generatorScopes.begin(), Generator->generatorScopes.end());
 		Generator->generatorScopes.clear();
 
@@ -4965,7 +4977,7 @@ CScriptVarPtr CTinyJS::generator_yield(CScriptResult &execute, CScriptVar *Yield
 	stackBase = generatorStckBase;
 
 	// safe callers and restore generator Scopes
-	Generator->callersScopeSize = scopes.size();
+	Generator->callersScopeSize = static_cast<int>(scopes.size());
 	scopes.insert(scopes.end(), Generator->generatorScopes.begin(), Generator->generatorScopes.end());
 	Generator->generatorScopes.clear();
 
