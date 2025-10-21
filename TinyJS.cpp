@@ -3163,8 +3163,17 @@ int64_t CNumber::parseInt(const char * str, int32_t radix/*=0*/, const char **en
 		return 0;
   }
   if(sign<0 && ((type==tInt64 && Int64==0) || (type==tDouble && Double==0.0))) { type=tnNULL,Int64=0; return radix; }
-  if(type==tInt64) operator=(sign<0 ? -Int64 : Int64);
-	else operator=(sign<0 ? -Double : Double);
+	if(type==tInt64) {
+		if (Int64 != Int32) {
+			setBigInt(true);
+			operator=(sign<0 ? -Int64 : Int64);
+		} else {
+			setBigInt(false);
+			operator=(sign<0 ? -Int32 : Int32);
+		}
+	} else {
+		operator=(sign<0 ? -Double : Double);
+	}
 	if(endptr) *endptr = (char*)str;
 	return radix;
 }
