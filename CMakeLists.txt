@@ -41,6 +41,8 @@ endif()
 if(TINYJS_BUILD_TESTS)
   add_executable(tiny-js-tests "run_tests.cpp")
   target_link_libraries(tiny-js-tests tiny-js)
+  add_executable(tiny-js-perf "run_perf.cpp")
+  target_link_libraries(tiny-js-perf tiny-js)
 endif()
 
 if(TINYJS_BUILD_APPS)

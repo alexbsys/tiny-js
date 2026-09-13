@@ -129,15 +129,61 @@ void show_allocated() {
 /// Utils
 //////////////////////////////////////////////////////////////////////////
 
-inline bool isWhitespace(char ch) {
-	return (ch==' ') || (ch=='\t') || (ch=='\n') || (ch=='\r');
+enum {
+	CC_WS    = 1,
+	CC_DIGIT = 2,
+	CC_ALPHA = 4,
+	CC_HEX   = 8,
+	CC_OCT   = 16
+};
+
+#ifdef _MSC_VER
+#define TINYJS_FORCE_INLINE __forceinline
+#else
+#define TINYJS_FORCE_INLINE inline
+#endif
+
+struct CharClassTable {
+	unsigned char t[256];
+	CharClassTable() {
+		memset(t, 0, sizeof(t));
+		t[(unsigned char)' '] = t[(unsigned char)'\t'] = t[(unsigned char)'\n'] = t[(unsigned char)'\r'] = CC_WS;
+		for (int c = '0'; c <= '9'; ++c)
+			t[c] = (unsigned char)(CC_DIGIT | CC_HEX | (c <= '7' ? CC_OCT : 0));
+		for (int c = 'a'; c <= 'z'; ++c)
+			t[c] = (unsigned char)(CC_ALPHA | (c <= 'f' ? CC_HEX : 0));
+		for (int c = 'A'; c <= 'Z'; ++c)
+			t[c] = (unsigned char)(CC_ALPHA | (c <= 'F' ? CC_HEX : 0));
+		t[(unsigned char)'_'] = t[(unsigned char)'$'] = CC_ALPHA;
+	}
+};
+static const CharClassTable gCharClass;
+
+TINYJS_FORCE_INLINE bool isWhitespace(char ch) {
+	return (gCharClass.t[(unsigned char)ch] & CC_WS) != 0;
+}
+TINYJS_FORCE_INLINE bool isNumeric(char ch) {
+	return (gCharClass.t[(unsigned char)ch] & CC_DIGIT) != 0;
+}
+// Decimal digits only, no sign/prefix. 1..9 digits; "0" ok, "07"/"0x" rejected.
+TINYJS_FORCE_INLINE bool tryParseSmallDecimal(const char *s, size_t n, uint32_t &out) {
+	if (n == 0 || n > 9 || !s || !isNumeric(s[0])) return false;
+	if (n > 1 && s[0] == '0') return false;
+	uint32_t v = 0;
+	for (size_t i = 0; i < n; ++i) {
+		if (!isNumeric(s[i])) return false;
+		v = v * 10u + (uint32_t)(s[i] - '0');
+	}
+	out = v;
+	return true;
 }
 
-inline bool isNumeric(char ch) {
-	return (ch>='0') && (ch<='9');
-}
 uint32_t isArrayIndex(const string &str) {
-	if(str.size()==0 || !isNumeric(str[0]) || (str.size()>1 && str[0]=='0') ) return -1; // empty or (more as 1 digit and beginning with '0')
+	const size_t n = str.size();
+	if(n==0 || !isNumeric(str[0]) || (n>1 && str[0]=='0') ) return -1; // empty or (more as 1 digit and beginning with '0')
+	uint32_t small;
+	if (tryParseSmallDecimal(str.c_str(), n, small))
+		return small;
 	CNumber idx;
 	const char *endptr;
 	idx.parseInt(str.c_str(), 10, &endptr);
@@ -147,14 +193,17 @@ uint32_t isArrayIndex(const string &str) {
 
 	return idx.toUInt32();
 }
-inline bool isHexadecimal(char ch) {
-	return ((ch>='0') && (ch<='9')) || ((ch>='a') && (ch<='f')) || ((ch>='A') && (ch<='F'));
+TINYJS_FORCE_INLINE bool isHexadecimal(char ch) {
+	return (gCharClass.t[(unsigned char)ch] & CC_HEX) != 0;
 }
-inline bool isOctal(char ch) {
-	return ((ch>='0') && (ch<='7'));
+TINYJS_FORCE_INLINE bool isOctal(char ch) {
+	return (gCharClass.t[(unsigned char)ch] & CC_OCT) != 0;
 }
-inline bool isAlpha(char ch) {
-	return ((ch>='a') && (ch<='z')) || ((ch>='A') && (ch<='Z')) || ch=='_' || ch=='$';
+TINYJS_FORCE_INLINE bool isAlpha(char ch) {
+	return (gCharClass.t[(unsigned char)ch] & CC_ALPHA) != 0;
+}
+TINYJS_FORCE_INLINE bool isIdentCont(char ch) {
+	return (gCharClass.t[(unsigned char)ch] & (CC_ALPHA | CC_DIGIT)) != 0;
 }
 
 bool isIDString(const char *s) {
@@ -310,14 +359,13 @@ void CScriptLex::match(int expected_tk1, int alternate_tk/*=-1*/) {
 	lineBreakBeforeToken = line != pos.currentLine;
 }
 
-void CScriptLex::getNextCh() {
+TINYJS_FORCE_INLINE void CScriptLex::getNextCh() {
 	if(currCh == '\n') { // Windows or Linux
 		pos.currentLine++;
 		pos.tokenStart = pos.currentLineStart = dataPos - (nextCh == LEX_EOF ?  0 : 1);
 	}
 	currCh = nextCh;
 	if ( (nextCh = *dataPos) != LEX_EOF ) dataPos++; // stay on EOF
-//	if(nextCh == -124) nextCh = '\n'; // 
 	if(currCh == '\r') { // Windows or Mac
 		if(nextCh == '\n')
 			getNextCh(); // Windows '\r\n\' --> skip '\r'
@@ -326,35 +374,42 @@ void CScriptLex::getNextCh() {
 	}
 }
 
+TINYJS_FORCE_INLINE const char *lexTokenCursor(const char *dataPos, char currCh, char nextCh) {
+	return dataPos - (nextCh == LEX_EOF ? (currCh == LEX_EOF ? 0 : 1) : 2);
+}
+
 static uint16_t not_allowed_tokens_befor_regexp[] = {LEX_ID, LEX_INT, LEX_BIGINT, LEX_FLOAT, LEX_STR, LEX_R_TRUE, LEX_R_FALSE, LEX_R_NULL, ']', ')', '.', LEX_PLUSPLUS, LEX_MINUSMINUS, LEX_EOF};
 void CScriptLex::getNextToken() {
-	while (currCh && isWhitespace(currCh)) getNextCh();
-	// newline comments
-	if (currCh=='/' && nextCh=='/') {
+	for (;;) {
+		while (currCh && isWhitespace(currCh)) getNextCh();
+		if (currCh=='/' && nextCh=='/') {
 			while (currCh && currCh!='\n') getNextCh();
-			getNextCh();
-			getNextToken();
-			return;
-	}
-	// block comments
-	if (currCh=='/' && nextCh=='*') {
+			if (currCh) getNextCh();
+			continue;
+		}
+		if (currCh=='/' && nextCh=='*') {
 			while (currCh && (currCh!='*' || nextCh!='/')) getNextCh();
 			getNextCh();
 			getNextCh();
-			getNextToken();
-			return;
+			continue;
+		}
+		break;
 	}
 	last_tk = tk;
 	tk = LEX_EOF;
 	tkStr.clear();
 	// record beginning of this token
-	pos.tokenStart = dataPos - (nextCh == LEX_EOF ? (currCh == LEX_EOF ? 0 : 1) : 2);
+	pos.tokenStart = lexTokenCursor(dataPos, currCh, nextCh);
 	// tokens
 	if (isAlpha(currCh)) { //  IDs
-		while (isAlpha(currCh) || isNumeric(currCh)) {
-			tkStr += currCh;
+		const char *idStart = pos.tokenStart;
+		size_t idLen = 0;
+		while (isIdentCont(currCh)) {
+			++idLen;
 			getNextCh();
 		}
+		// Length, not end-pointer: getNextCh() collapses \r\n, so a raw slice would keep '\r'.
+		tkStr.assign(idStart, idLen);
 		tk = CScriptToken::isReservedWord(tkStr);
 #ifdef NO_GENERATORS
 		if(tk == LEX_R_YIELD)
@@ -362,27 +417,28 @@ void CScriptLex::getNextToken() {
 #endif
 
 	} else if (isNumeric(currCh) || (currCh=='.' && isNumeric(nextCh))) { // Numbers
-		if(currCh=='.') tkStr+='0';
+		tkStr.reserve(24);
+		if(currCh=='.') tkStr.push_back('0');
 		bool isHex = false, isOct=false;
 		if (currCh=='0') { 
-			tkStr += currCh; getNextCh();
+			tkStr.push_back(currCh); getNextCh();
 			if(isOctal(currCh)) isOct = true;
 		}
 		if (currCh=='x' || currCh=='X') {
 			isHex = true;
-			tkStr += currCh; getNextCh();
+			tkStr.push_back(currCh); getNextCh();
 		}
 		tk = LEX_INT;
 		while (isOctal(currCh) || (!isOct && isNumeric(currCh)) || (isHex && isHexadecimal(currCh))) {
-			tkStr += currCh;
+			tkStr.push_back(currCh);
 			getNextCh();
 		}
 		if (!isHex && !isOct && currCh=='.') {
 			tk = LEX_FLOAT;
-			tkStr += '.';
+			tkStr.push_back('.');
 			getNextCh();
 			while (isNumeric(currCh)) {
-				tkStr += currCh;
+				tkStr.push_back(currCh);
 				getNextCh();
 			}
 		}
@@ -396,14 +452,15 @@ void CScriptLex::getNextToken() {
 		// do fancy e-style floating point
 		if (!isHex && !isOct && (currCh=='e' || currCh=='E')) {
 			tk = LEX_FLOAT;
-			tkStr += currCh; getNextCh();
-			if (currCh=='-') { tkStr += currCh; getNextCh(); }
+			tkStr.push_back(currCh); getNextCh();
+			if (currCh=='-') { tkStr.push_back(currCh); getNextCh(); }
 			while (isNumeric(currCh)) {
-				tkStr += currCh; getNextCh();
+				tkStr.push_back(currCh); getNextCh();
 			}
 		}
 	} else if (currCh=='"' || currCh=='\'') {	// strings...
 		char endCh = currCh;
+		tkStr.reserve(32);
 		getNextCh();
 		while (currCh && currCh!=endCh && currCh!='\n') {
 			if (currCh == '\\') {
@@ -919,18 +976,26 @@ CScriptToken::CScriptToken(CScriptLex *l, int Match, int Alternate) : line(l->cu
 {
 	if(token == LEX_INT || token == LEX_BIGINT) {
 		// Integer / bigint literals must not go through strtod (IEEE rounding above 2^53).
-		CNumber number;
-		number.parseInt(l->tkStr.c_str(), 0);
-		if (token == LEX_BIGINT)
-			number.setBigInt(true);
-		if (number.isInfinity())
-			token=LEX_ID, (tokenData=new CScriptTokenDataString("Infinity"))->ref();
-		else if (number.isDouble() || number.isNaN())
-			token = LEX_FLOAT, floatData = new double(number.toDouble());
-		else if (token == LEX_BIGINT || number.isBigInt())
-			token = LEX_BIGINT, int64Data = number.toInt64();
-		else
-			token = LEX_INT, intData = number.toInt32();
+		uint32_t small;
+		if (tryParseSmallDecimal(l->tkStr.c_str(), l->tkStr.size(), small)) {
+			if (token == LEX_BIGINT)
+				int64Data = (int64_t)small;
+			else
+				intData = (int32_t)small;
+		} else {
+			CNumber number;
+			number.parseInt(l->tkStr.c_str(), 0);
+			if (token == LEX_BIGINT)
+				number.setBigInt(true);
+			if (number.isInfinity())
+				token=LEX_ID, (tokenData=new CScriptTokenDataString("Infinity"))->ref();
+			else if (number.isDouble() || number.isNaN())
+				token = LEX_FLOAT, floatData = new double(number.toDouble());
+			else if (token == LEX_BIGINT || number.isBigInt())
+				token = LEX_BIGINT, int64Data = number.toInt64();
+			else
+				token = LEX_INT, intData = number.toInt32();
+		}
 	} else if(LEX_TOKEN_DATA_FLOAT(token)) {
 		CNumber number(l->tkStr);
 		if(number.isInfinity())
@@ -1146,13 +1211,62 @@ const char *CScriptToken::isReservedWord(int Token) {
 	return 0;
 }
 int CScriptToken::isReservedWord(const string &Str) {
-	const char *str = Str.c_str();
-	if(!tokens2str_sorted) tokens2str_sorted=tokens2str_sort();
-	token2str_t **found = lower_bound(str2reserved_begin, str2reserved_end, str, token2str_cmp_t());
-	if(found != str2reserved_end && strcmp((*found)->str, str)==0) {
-		return (*found)->id;
+	const char *s = Str.c_str();
+	switch (Str.size()) {
+	case 2:
+		if (s[0]=='d' && s[1]=='o') return LEX_R_DO;
+		if (s[0]=='i') {
+			if (s[1]=='f') return LEX_R_IF;
+			if (s[1]=='n') return LEX_R_IN;
+		}
+		return LEX_ID;
+	case 3:
+		if (s[0]=='f' && s[1]=='o' && s[2]=='r') return LEX_R_FOR;
+		if (s[0]=='l' && s[1]=='e' && s[2]=='t') return LEX_R_LET;
+		if (s[0]=='n' && s[1]=='e' && s[2]=='w') return LEX_R_NEW;
+		if (s[0]=='t' && s[1]=='r' && s[2]=='y') return LEX_R_TRY;
+		if (s[0]=='v' && s[1]=='a' && s[2]=='r') return LEX_R_VAR;
+		return LEX_ID;
+	case 4:
+		if (s[0]=='c' && s[1]=='a' && s[2]=='s' && s[3]=='e') return LEX_R_CASE;
+		if (s[0]=='e' && s[1]=='l' && s[2]=='s' && s[3]=='e') return LEX_R_ELSE;
+		if (s[0]=='n' && s[1]=='u' && s[2]=='l' && s[3]=='l') return LEX_R_NULL;
+		if (s[0]=='t' && s[1]=='r' && s[2]=='u' && s[3]=='e') return LEX_R_TRUE;
+		if (s[0]=='v' && s[1]=='o' && s[2]=='i' && s[3]=='d') return LEX_R_VOID;
+		if (s[0]=='w' && s[1]=='i' && s[2]=='t' && s[3]=='h') return LEX_R_WITH;
+		return LEX_ID;
+	case 5:
+		if (s[0]=='b' && s[1]=='r' && s[2]=='e' && s[3]=='a' && s[4]=='k') return LEX_R_BREAK;
+		if (s[0]=='c') {
+			if (s[1]=='a' && s[2]=='t' && s[3]=='c' && s[4]=='h') return LEX_R_CATCH;
+			if (s[1]=='o' && s[2]=='n' && s[3]=='s' && s[4]=='t') return LEX_R_CONST;
+		}
+		if (s[0]=='f' && s[1]=='a' && s[2]=='l' && s[3]=='s' && s[4]=='e') return LEX_R_FALSE;
+		if (s[0]=='t' && s[1]=='h' && s[2]=='r' && s[3]=='o' && s[4]=='w') return LEX_R_THROW;
+		if (s[0]=='w' && s[1]=='h' && s[2]=='i' && s[3]=='l' && s[4]=='e') return LEX_R_WHILE;
+		if (s[0]=='y' && s[1]=='i' && s[2]=='e' && s[3]=='l' && s[4]=='d') return LEX_R_YIELD;
+		return LEX_ID;
+	case 6:
+		if (s[0]=='d' && s[1]=='e' && s[2]=='l' && s[3]=='e' && s[4]=='t' && s[5]=='e') return LEX_R_DELETE;
+		if (s[0]=='r' && s[1]=='e' && s[2]=='t' && s[3]=='u' && s[4]=='r' && s[5]=='n') return LEX_R_RETURN;
+		if (s[0]=='s' && s[1]=='w' && s[2]=='i' && s[3]=='t' && s[4]=='c' && s[5]=='h') return LEX_R_SWITCH;
+		if (s[0]=='t' && s[1]=='y' && s[2]=='p' && s[3]=='e' && s[4]=='o' && s[5]=='f') return LEX_R_TYPEOF;
+		return LEX_ID;
+	case 7:
+		if (s[0]=='d' && s[1]=='e' && s[2]=='f' && s[3]=='a' && s[4]=='u' && s[5]=='l' && s[6]=='t') return LEX_R_DEFAULT;
+		if (s[0]=='f' && s[1]=='i' && s[2]=='n' && s[3]=='a' && s[4]=='l' && s[5]=='l' && s[6]=='y') return LEX_R_FINALLY;
+		return LEX_ID;
+	case 8:
+		if (s[0]=='c' && s[1]=='o' && s[2]=='n' && s[3]=='t' && s[4]=='i' && s[5]=='n' && s[6]=='u' && s[7]=='e') return LEX_R_CONTINUE;
+		if (s[0]=='f' && s[1]=='u' && s[2]=='n' && s[3]=='c' && s[4]=='t' && s[5]=='i' && s[6]=='o' && s[7]=='n') return LEX_R_FUNCTION;
+		return LEX_ID;
+	case 10:
+		if (s[0]=='i' && s[1]=='n' && s[2]=='s' && s[3]=='t' && s[4]=='a' && s[5]=='n' && s[6]=='c' && s[7]=='e' && s[8]=='o' && s[9]=='f')
+			return LEX_R_INSTANCEOF;
+		return LEX_ID;
+	default:
+		return LEX_ID;
 	}
-	return LEX_ID;
 }
 
 
@@ -1175,6 +1289,12 @@ void CScriptTokenizer::tokenizeCode(CScriptLex &Lexer) {
 		tokens.clear();
 		tokenScopeStack.clear();
 		ScriptTokenState state;
+		{
+			size_t hint = Lexer.sourceBytes() / 3;
+			if (hint < 16) hint = 16;
+			if (hint > (size_t)1 << 20) hint = (size_t)1 << 20;
+			state.Tokens.reserve(hint);
+		}
 		pushForwarder(state);
 		if((uint8_t)l->tk == 0xA7) { // special-Token at Start means the code begins not at Statement-Level
 			l->match((char)0xA7);
@@ -2408,6 +2528,7 @@ CScriptVar::CScriptVar(CTinyJS *Context, const CScriptVarPtr &Prototype) {
 	context->first = this;
 	prev = 0;
 	refs = 0;
+	context->noteAlloc();
 	if(Prototype)
 		addChild(TINYJS___PROTO___VAR, Prototype, SCRIPTVARLINK_WRITABLE);
 #if DEBUG_MEMORY
@@ -2427,6 +2548,7 @@ CScriptVar::CScriptVar(const CScriptVar &Copy) {
 	context->first = this;
 	prev = 0;
 	refs = 0;
+	context->noteAlloc();
 	SCRIPTVAR_CHILDS_cit it;
 	for(it = Copy.Childs.begin(); it!= Copy.Childs.end(); ++it) {
 		addChild((*it)->getName(), (*it)->getVarPtr(), (*it)->getFlags());
@@ -2997,6 +3119,16 @@ void CScriptVar::setTemporaryMark_recursive(uint32_t ID)
 			(*it)->getVarPtr()->setTemporaryMark_recursive(ID);
 		}
 	}
+}
+
+static inline void gcIncIncoming(const CScriptVarPtr &v, int slot) {
+	if (v) v.getVar()->temporaryMark[slot]++;
+}
+
+void CScriptVar::gcAccountOutgoing(int slot)
+{
+	for(SCRIPTVAR_CHILDS_it it = Childs.begin(); it != Childs.end(); ++it)
+		gcIncIncoming((*it)->getVarPtr(), slot);
 }
 
 
@@ -3904,6 +4036,11 @@ void CScriptVarObject::setTemporaryMark_recursive( uint32_t ID) {
 	if(value) value->setTemporaryMark_recursive(ID);
 }
 
+void CScriptVarObject::gcAccountOutgoing(int slot) {
+	CScriptVar::gcAccountOutgoing(slot);
+	gcIncIncoming(value, slot);
+}
+
 
 ////////////////////////////////////////////////////////////////////////// 
 /// CScriptVarObjectTyped (simple Object with Typename
@@ -4170,6 +4307,11 @@ void CScriptVarDefaultIterator::setTemporaryMark_recursive(uint32_t ID) {
 	CScriptVarObject::setTemporaryMark_recursive(ID);
 	if(object) object->setTemporaryMark_recursive(ID);
 }
+
+void CScriptVarDefaultIterator::gcAccountOutgoing(int slot) {
+	CScriptVarObject::gcAccountOutgoing(slot);
+	gcIncIncoming(object, slot);
+}
 void CScriptVarDefaultIterator::removeAllChildren() {
 	CScriptVarObject::removeAllChildren();
 	object.clear();
@@ -4229,6 +4371,15 @@ void CScriptVarGenerator::setTemporaryMark_recursive( uint32_t ID ) {
 	if(yieldVar) yieldVar->setTemporaryMark_recursive(ID);
 	for(std::vector<CScriptVarScopePtr>::iterator it=generatorScopes.begin(); it != generatorScopes.end(); ++it)
 		(*it)->setTemporaryMark_recursive(ID);
+}
+
+void CScriptVarGenerator::gcAccountOutgoing(int slot) {
+	CScriptVarObject::gcAccountOutgoing(slot);
+	gcIncIncoming(functionRoot, slot);
+	gcIncIncoming(function, slot);
+	gcIncIncoming(yieldVar, slot);
+	for(std::vector<CScriptVarScopePtr>::iterator it=generatorScopes.begin(); it != generatorScopes.end(); ++it)
+		gcIncIncoming(*it, slot);
 }
 void CScriptVarGenerator::native_send(const CFunctionsScopePtr &c, void *data) {
 	// data == 0 ==> next()
@@ -4377,6 +4528,14 @@ void CScriptVarFunctionBounded::setTemporaryMark_recursive(uint32_t ID) {
 	if(boundedThis) boundedThis->setTemporaryMark_recursive(ID);
 	for(vector<CScriptVarPtr>::iterator it=boundedArguments.begin(); it!=boundedArguments.end(); ++it)
 		if(*it) (*it)->setTemporaryMark_recursive(ID);
+}
+
+void CScriptVarFunctionBounded::gcAccountOutgoing(int slot) {
+	CScriptVarFunction::gcAccountOutgoing(slot);
+	gcIncIncoming(boundedFunction, slot);
+	gcIncIncoming(boundedThis, slot);
+	for(vector<CScriptVarPtr>::iterator it=boundedArguments.begin(); it!=boundedArguments.end(); ++it)
+		gcIncIncoming(*it, slot);
 }
 void CScriptVarFunctionBounded::removeAllChildren() {
 	CScriptVarObject::removeAllChildren();
@@ -4623,7 +4782,7 @@ CTinyJS::CTinyJS() {
 	first = 0;
 	uniqueID = 0;
 	currentMarkSlot = -1;
-	gcDefer = 0;
+	allocsSinceGc = 0;
 	stackBase = 0;
 
 	
@@ -6392,7 +6551,7 @@ void CTinyJS::execute_statement(CScriptResult &execute) {
 				t->pushTokenScope(LoopData.body);
 				execute_statement(execute);
 				if(execute)
-					maybeClearUnreferedVars(execute.value);
+					maybeClearUnreferedVars(execute.value, Iterator);
 				if(!execute) {
 					bool Continue = false;
 					if(execute.isBreakContinue() 
@@ -7321,12 +7480,26 @@ void CTinyJS::setTemporaryID_recursive(uint32_t ID) {
 #endif
 }
 
-void CTinyJS::ClearUnreferedVars(const CScriptVarPtr &extra/*=CScriptVarPtr()*/) {
-	uint32_t UniqueID = allocUniqueID(); 
+void CTinyJS::ClearUnreferedVars(const CScriptVarPtr &extra/*=CScriptVarPtr()*/, const CScriptVarPtr &extra2/*=CScriptVarPtr()*/) {
+	uint32_t UniqueID = allocUniqueID();
+	const int incomingSlot = currentMarkSlot + 1;
+	ASSERT(incomingSlot < TEMPORARY_MARK_SLOTS);
 	setTemporaryID_recursive(UniqueID);
 	if(extra) extra->setTemporaryMark_recursive(UniqueID);
-	CScriptVar *p = first;
+	if(extra2) extra2->setTemporaryMark_recursive(UniqueID);
 
+	// C++ CScriptVarPtr locals are not in JS scopes. Count heap edges
+	// (Childs + extra members) and treat refs > incoming as stack roots
+	// so sweep cannot gut a live iterator / temp while a C++ pointer holds it.
+	for (CScriptVar *p = first; p; p = p->next)
+		p->temporaryMark[incomingSlot] = 0;
+	for (CScriptVar *p = first; p; p = p->next)
+		p->gcAccountOutgoing(incomingSlot);
+	for (CScriptVar *p = first; p; p = p->next)
+		if (p->getTemporaryMark() != UniqueID && p->getRefs() > (int)p->temporaryMark[incomingSlot])
+			p->setTemporaryMark_recursive(UniqueID);
+
+	CScriptVar *p = first;
 	while(p)
 	{
 		if(p->getTemporaryMark() != UniqueID)
@@ -7341,12 +7514,14 @@ void CTinyJS::ClearUnreferedVars(const CScriptVarPtr &extra/*=CScriptVarPtr()*/)
 	freeUniqueID();
 }
 
-void CTinyJS::maybeClearUnreferedVars(const CScriptVarPtr &extra) {
-	if (++gcDefer < 32)
+void CTinyJS::maybeClearUnreferedVars(const CScriptVarPtr &extra, const CScriptVarPtr &extra2) {
+	// Not a loop-trip limit: sweep when enough objects were allocated.
+	// Back-edges just poll this so a long loop cannot leak forever.
+	if (allocsSinceGc < 1024)
 		return;
-	gcDefer = 0;
-	if (currentMarkSlot + 1 >= TEMPORARY_MARK_SLOTS)
+	if (currentMarkSlot + 2 >= TEMPORARY_MARK_SLOTS)
 		return;
-	ClearUnreferedVars(extra);
+	allocsSinceGc = 0;
+	ClearUnreferedVars(extra, extra2);
 }
 

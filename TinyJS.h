@@ -306,6 +306,7 @@ public:
 	int currentLine() { return pos.currentLine; }
 	int currentColumn() { return pos.currentColumn(); }
 	bool lineBreakBeforeToken;
+	size_t sourceBytes() const { return data ? strlen(data) : 0; }
 private:
 	const char *data;
 	const char *dataPos;
@@ -839,6 +840,7 @@ public:
 	template<typename T>	const CScriptVarPtr &constScriptVar(T t); // { return ::newScriptVar(context, t); }
 	void setTemporaryMark(uint32_t ID); // defined as inline at end of this file { temporaryMark[context->getCurrentMarkSlot()] = ID; }
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot); ///< count JS / C++ member edges into temporaryMark[slot]
 	uint32_t getTemporaryMark(); // defined as inline at end of this file { return temporaryMark[context->getCurrentMarkSlot()]; }
 protected:
 	bool extensible;
@@ -1468,6 +1470,7 @@ public:
 	virtual CScriptVarPtr valueOf_CallBack();
 	virtual CScriptVarPtr toString_CallBack(CScriptResult &execute, int radix=0);
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot);
 protected:
 private:
 	CScriptVarPrimitivePtr value;
@@ -1654,6 +1657,7 @@ public:
 	virtual CScriptVarPtr clone();
 	virtual bool isBounded();	///< is CScriptVarFunctionBounded
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot);
 	virtual void removeAllChildren();
 	CScriptVarPtr callFunction(CScriptResult &execute, std::vector<CScriptVarPtr> &Arguments, const CScriptVarPtr &This, CScriptVarPtr *newThis=0);
 protected:
@@ -1913,6 +1917,7 @@ public:
 
 	void native_next(const CFunctionsScopePtr &c, void *data);
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot);
 	virtual void removeAllChildren();
 private:
 	int mode;
@@ -1952,6 +1957,7 @@ public:
 	CScriptVarFunctionPtr getFunction() { return function; }
 
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot);
 
 	void native_send(const CFunctionsScopePtr &c, void *data);
 	void native_throw(const CFunctionsScopePtr &c, void *data);
@@ -2343,7 +2349,7 @@ private:
 
 	uint32_t uniqueID;
 	int32_t currentMarkSlot;
-	uint32_t gcDefer;
+	uint32_t allocsSinceGc;
 	void *stackBase;
 public:
 	int32_t getCurrentMarkSlot() {
@@ -2361,8 +2367,9 @@ public:
 	}
 	CScriptVar *first;
 	void setTemporaryID_recursive(uint32_t ID);
-	void ClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr());
-	void maybeClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr());
+	void ClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr(), const CScriptVarPtr &extra2=CScriptVarPtr());
+	void maybeClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr(), const CScriptVarPtr &extra2=CScriptVarPtr());
+	void noteAlloc() { allocsSinceGc++; }
 	void setStackBase(void * StackBase) { stackBase = StackBase; }
 	void setStackBase(uint32_t StackSize) { char dummy; stackBase = StackSize ? &dummy-StackSize : 0; }
 };
