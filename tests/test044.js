@@ -30,5 +30,12 @@ for (const pair of m2) mapSum += pair[1];
 var s = 0;
 for (const n of [1, 2, 3, 4, 5]) s += n;
 
+var internSum = 0;
+for (i = 0; i < 50; i++) internSum = internSum + 1;
+var mixed = internSum + "x";
+var big = 9007199254740993n + 1n;
+var wide = 200000 + 300000;
+
 result = live.f() === 7 && live.self.n === 7 && box.get() === 1 && s === 15
-	&& m.get(live) === 2 && m.size === 1 && mapSum === 179700 && m2.size === 600;
+	&& m.get(live) === 2 && m.size === 1 && mapSum === 179700 && m2.size === 600
+	&& internSum === 50 && mixed === "50x" && big === 9007199254740994n && wide === 500000;

@@ -3932,7 +3932,7 @@ double CNumber::toDouble() const
 /// CScriptVarNumber
 //////////////////////////////////////////////////////////////////////////
 
-CScriptVarNumber::CScriptVarNumber(CTinyJS *Context, const CNumber &Data) : CScriptVarPrimitive(Context, Context->numberPrototype), data(Data) {}
+CScriptVarNumber::CScriptVarNumber(CTinyJS *Context, const CNumber &Data) : CScriptVarPrimitive(Context, Context->numberPrototype), data(Data), interned(false) {}
 CScriptVarNumber::~CScriptVarNumber() {}
 CScriptVarPtr CScriptVarNumber::clone() { return new CScriptVarNumber(*this); }
 bool CScriptVarNumber::isNumber() { return true; }
@@ -3955,6 +3955,8 @@ define_newScriptVar_Fnc(Number, CTinyJS *Context, const CNumber &Obj) {
 		if(Obj.isInfinity()) return Context->constScriptVar(Infinity(Obj.sign()));
 		if(Obj.isNegativeZero()) return Context->constScriptVar(NegativeZero);
 	}
+	if (CScriptVarPtr interned = Context->getInternedSmallInt(Obj))
+		return interned;
 	return new CScriptVarNumber(Context, Obj); 
 }
 
@@ -4986,7 +4988,7 @@ CTinyJS::CTinyJS() {
 	constNegativZero	= newScriptVarNumber(this, NegativeZero);	pseudo_refered.push_back(&constNegativZero);
 	constFalse	= newScriptVarBool(this, false);	pseudo_refered.push_back(&constFalse);
 	constTrue	= newScriptVarBool(this, true);	pseudo_refered.push_back(&constTrue);
-	
+
 	//////////////////////////////////////////////////////////////////////////
 	// add global functions
 	addNative("function eval(jsCode)", this, &CTinyJS::native_eval);
@@ -5006,6 +5008,24 @@ CTinyJS::CTinyJS() {
 	_registerDateFunctions(this);
 }
 
+CScriptVarPtr CTinyJS::getInternedSmallInt(const CNumber &n) {
+	// Strings / objects never reach here. BigInt, doubles, NaN, and wide ints stay boxed.
+	if (n.isBigInt() || !n.isInt32())
+		return CScriptVarPtr();
+	const int64_t v64 = n.toInt64();
+	if (v64 < SMALL_INT_MIN || v64 > SMALL_INT_MAX)
+		return CScriptVarPtr();
+	const int idx = (int)v64 - SMALL_INT_MIN;
+	if (!smallIntCache[idx]) {
+		CNumber stored((int32_t)v64);
+		stored.setBigInt(false);
+		smallIntCache[idx] = ::newScriptVarNumber(this, stored);
+		if (CScriptVarNumber *boxed = dynamic_cast<CScriptVarNumber*>(smallIntCache[idx].getVar()))
+			boxed->markInterned();
+	}
+	return smallIntCache[idx];
+}
+
 CTinyJS::~CTinyJS() {
 	delete debug_;
 	debug_ = 0;
@@ -5014,6 +5034,8 @@ CTinyJS::~CTinyJS() {
 		**it = CScriptVarPtr();
 	for(int i=Error; i<ERROR_COUNT; i++)
 		errorPrototypes[i] = CScriptVarPtr();
+	for (int i = 0; i < SMALL_INT_COUNT; ++i)
+		smallIntCache[i] = CScriptVarPtr();
 	root->removeAllChildren();
 	scopes.clear();
 	ClearUnreferedVars();
@@ -5540,7 +5562,61 @@ CScriptVarPtr CTinyJS::generator_yield(CScriptResult &execute, CScriptVar *Yield
 
 
 
-CScriptVarPtr CTinyJS::mathsOp(CScriptResult &execute, const CScriptVarPtr &A, const CScriptVarPtr &B, int op) {
+CScriptVarPtr CTinyJS::newNumberMaybeReuse(const CScriptVarPtr &candidate, const CScriptVarPtr &otherLocal, const CNumber &result, bool allowReuse) {
+	if (!allowReuse || !candidate)
+		return newScriptVar(result);
+	CScriptVarNumber *num = dynamic_cast<CScriptVarNumber*>(candidate.getVar());
+	if (!num || num->isInternedNumber())
+		return newScriptVar(result);
+	int locals = 1;
+	if (otherLocal && otherLocal.getVar() == candidate.getVar())
+		locals++;
+	// Every CScriptVarPtr is a live ref (JS slots, intern cache, C++ locals).
+	// Subtract the pointers we hold here; anything above one extra owner is an alias.
+	if (num->getRefs() > locals + 1)
+		return newScriptVar(result);
+	if (!result.isInt32() && !result.isDouble())
+		return newScriptVar(result);
+	if (CScriptVarPtr interned = getInternedSmallInt(result))
+		return interned;
+	num->setNumber(result);
+	return candidate;
+}
+
+static bool isNumberArithOp(int op) {
+	switch (op) {
+	case '+': case '-': case '*': case '/': case '%':
+	case '&': case '|': case '^':
+	case LEX_LSHIFT: case LEX_RSHIFT: case LEX_RSHIFTU:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// `s = s + x && y` / `s = s + 1 ? a : b` must not become `s += ...` — those bind to the whole add.
+static bool assignmentAddendHasLogicOrTernary(CScriptTokenizer *t) {
+	int depth = 0;
+	while (t->tk != LEX_EOF) {
+		int tk = t->tk;
+		if (tk == '(' || tk == '[' || tk == '{')
+			depth++;
+		else if (tk == ')' || tk == ']' || tk == '}') {
+			if (depth == 0)
+				return false;
+			depth--;
+		} else if (depth == 0) {
+			if (tk == '?' || tk == LEX_ANDAND || tk == LEX_OROR || tk == LEX_NULLISH)
+				return true;
+			if (tk == ',' || tk == ';' || tk == ':')
+				return false;
+		}
+		t->getNextToken();
+	}
+	return false;
+}
+
+CScriptVarPtr CTinyJS::mathsOp(CScriptResult &execute, const CScriptVarPtr &A, const CScriptVarPtr &B, int op, bool reuseLeft) {
 	if(!execute) return constUndefined;
 	if (op == LEX_TYPEEQUAL || op == LEX_NTYPEEQUAL) {
 		// === / !== must not coerce. Different types: === false, !== true.
@@ -5596,18 +5672,18 @@ CScriptVarPtr CTinyJS::mathsOp(CScriptResult &execute, const CScriptVarPtr &A, c
 	CNumber da = a->toNumber();
 	CNumber db = b->toNumber();
 	switch (op) {
-	case '+':			return a->newScriptVar(da+db);
-	case '-':			return a->newScriptVar(da-db);
-	case '*':			return a->newScriptVar(da*db);
-	case '/':			return a->newScriptVar(da/db);
-	case '%':			return a->newScriptVar(da%db);
+	case '+':			return newNumberMaybeReuse(a, b, da+db, reuseLeft);
+	case '-':			return newNumberMaybeReuse(a, b, da-db, reuseLeft);
+	case '*':			return newNumberMaybeReuse(a, b, da*db, reuseLeft);
+	case '/':			return newNumberMaybeReuse(a, b, da/db, reuseLeft);
+	case '%':			return newNumberMaybeReuse(a, b, da%db, reuseLeft);
   case '&':			return a->newScriptVar(da.toInt64()&db.toInt64());
   case '|':			return a->newScriptVar(da.toInt64()|db.toInt64());
   case '^':			return a->newScriptVar(da.toInt64()^db.toInt64());
 	case '~':			return a->newScriptVar(~da);
-	case LEX_LSHIFT:	return a->newScriptVar(da<<db);
-	case LEX_RSHIFT:	return a->newScriptVar(da>>db);
-	case LEX_RSHIFTU:	return a->newScriptVar(da.ushift(db));
+	case LEX_LSHIFT:	return newNumberMaybeReuse(a, b, da<<db, reuseLeft);
+	case LEX_RSHIFT:	return newNumberMaybeReuse(a, b, da>>db, reuseLeft);
+	case LEX_RSHIFTU:	return newNumberMaybeReuse(a, b, da.ushift(db), reuseLeft);
 	case LEX_EQUAL:	return a->constScriptVar(da==db);
 	case LEX_NEQUAL:	return a->constScriptVar(da!=db);
 	case '<':			return a->constScriptVar(da<db);
@@ -6114,7 +6190,8 @@ CScriptVarLinkWorkPtr CTinyJS::execute_unary(CScriptResult &execute) {
 					throwError(execute, SyntaxError, string("invalid ")+(op==LEX_PLUSPLUS ? "increment" : "decrement")+" operand", ErrorPos);
 				else if(!a->isOwned() && !a.hasReferencedOwner() && !a->getName().empty())
 					throwError(execute, ReferenceError, a->getName() + " is not defined", ErrorPos);
-				CScriptVarPtr res = newScriptVar(a.getter(execute)->getVarPtr()->toNumber(execute).add(op==LEX_PLUSPLUS ? 1 : -1));
+				CScriptVarPtr cur = a.getter(execute)->getVarPtr();
+				CScriptVarPtr res = newNumberMaybeReuse(cur, CScriptVarPtr(), cur->toNumber(execute).add(op==LEX_PLUSPLUS ? 1 : -1), true);
 				if(a->isWritable()) {
 					if(!a->isOwned() && a.hasReferencedOwner() && a.getReferencedOwner()->isExtensible())
 						a.getReferencedOwner()->addChildOrReplace(a->getName(), res);
@@ -6138,8 +6215,9 @@ CScriptVarLinkWorkPtr CTinyJS::execute_unary(CScriptResult &execute) {
 				throwError(execute, SyntaxError, string("invalid ")+(op==LEX_PLUSPLUS ? "increment" : "decrement")+" operand", t->getPrevPos());
 			else if(!a->isOwned() && !a.hasReferencedOwner() && !a->getName().empty())
 				throwError(execute, ReferenceError, a->getName() + " is not defined", t->getPrevPos());
-			CNumber num = a.getter(execute)->getVarPtr()->toNumber(execute);
-			CScriptVarPtr res = newScriptVar(num.add(op==LEX_PLUSPLUS ? 1 : -1));
+			CScriptVarPtr cur = a.getter(execute)->getVarPtr();
+			CNumber num = cur->toNumber(execute);
+			CScriptVarPtr res = newNumberMaybeReuse(cur, CScriptVarPtr(), num.add(op==LEX_PLUSPLUS ? 1 : -1), true);
 			if(a->isWritable()) {
 				if(!a->isOwned() && a.hasReferencedOwner() && a.getReferencedOwner()->isExtensible())
 					a.getReferencedOwner()->addChildOrReplace(a->getName(), res);
@@ -6349,17 +6427,35 @@ CScriptVarLinkPtr CTinyJS::execute_assignment(CScriptResult &execute) {
 CScriptVarLinkPtr CTinyJS::execute_assignment(CScriptVarLinkWorkPtr lhs, CScriptResult &execute) {
 	if (t->tk=='=' || (t->tk>=LEX_ASSIGNMENTS_BEGIN && t->tk<=LEX_ASSIGNMENTS_END) ) {
 		int op = t->tk;
+		int reuseArith = 0;
 		CScriptTokenizer::ScriptTokenPosition leftHandPos = t->getPos();
 		t->match(t->tk);
+		// `s = s + expr` is `s += expr` when `?` / `&&` / `||` / `??` do not bind to the add.
+		if (op=='=' && lhs && !lhs->getName().empty() && t->tk==LEX_ID && t->tkStr()==lhs->getName()) {
+			CScriptTokenizer::ScriptTokenPosition saved = t->getPos();
+			t->getNextToken();
+			int arith = t->tk;
+			bool selfArith = isNumberArithOp(arith);
+			if (selfArith) {
+				t->getNextToken();
+				selfArith = !assignmentAddendHasLogicOrTernary(t);
+			}
+			t->setPos(saved);
+			if (selfArith) {
+				t->match(LEX_ID);
+				t->match(arith);
+				reuseArith = arith;
+			}
+		}
 		CScriptVarLinkWorkPtr rhs = execute_assignment(execute).getter(execute); // L<-R
 		if (execute) {
 			if (!lhs->isOwned() && !lhs.hasReferencedOwner() && lhs->getName().empty()) {
 				throw new CScriptException(ReferenceError, "invalid assignment left-hand side (at runtime)", t->currentFile, leftHandPos.currentLine(), leftHandPos.currentColumn());
-			} else if (op != '=' && !lhs->isOwned()) {
+			} else if ((op != '=' || reuseArith) && !lhs->isOwned()) {
 				throwError(execute, ReferenceError, lhs->getName() + " is not defined");
 			}
 			else if(lhs->isWritable()) {
-				if (op=='=') {
+				if (op=='=' && !reuseArith) {
 					if (!lhs->isOwned()) {
 						CScriptVarPtr fakedOwner = lhs.getReferencedOwner();
 						if(fakedOwner) {
@@ -6374,7 +6470,8 @@ CScriptVarLinkPtr CTinyJS::execute_assignment(CScriptVarLinkWorkPtr lhs, CScript
 				} else {
 					CScriptVarPtr result;
 					static int assignments[] = {'+', '-', '*', '/', '%', LEX_LSHIFT, LEX_RSHIFT, LEX_RSHIFTU, '&', '|', '^'};
-					result = mathsOp(execute, lhs, rhs, assignments[op-LEX_PLUSEQUAL]);
+					int arithOp = reuseArith ? reuseArith : assignments[op-LEX_PLUSEQUAL];
+					result = mathsOp(execute, lhs, rhs, arithOp, true);
 					lhs.setter(execute, result);
 					return result;
 				}
@@ -7471,6 +7568,8 @@ void CTinyJS::setTemporaryID_recursive(uint32_t ID) {
 		if(**it) (**it)->setTemporaryMark_recursive(ID);
 	for(int i=Error; i<ERROR_COUNT; i++)
 		if(errorPrototypes[i]) errorPrototypes[i]->setTemporaryMark_recursive(ID);
+	for (int i = 0; i < SMALL_INT_COUNT; ++i)
+		if (smallIntCache[i]) smallIntCache[i]->setTemporaryMark_recursive(ID);
 	root->setTemporaryMark_recursive(ID);
 	for(vector<CScriptVarScopePtr>::iterator it = scopes.begin(); it != scopes.end(); ++it)
 		if(*it) (*it)->setTemporaryMark_recursive(ID);

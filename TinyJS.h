@@ -1365,7 +1365,7 @@ define_ScriptVarPtr_Type(Number);
 class CScriptVarNumber : public CScriptVarPrimitive {
 protected:
 	CScriptVarNumber(CTinyJS *Context, const CNumber &Data);
-	CScriptVarNumber(const CScriptVarNumber &Copy) : CScriptVarPrimitive(Copy), data(Copy.data) {} ///< Copy protected -> use clone for public
+	CScriptVarNumber(const CScriptVarNumber &Copy) : CScriptVarPrimitive(Copy), data(Copy.data), interned(false) {} ///< Copy protected -> use clone for public
 public:
 	virtual ~CScriptVarNumber();
 	virtual CScriptVarPtr clone();
@@ -1383,8 +1383,12 @@ public:
 	virtual std::string getVarType(); // { return "number"; }
 
 	virtual CScriptVarPtr toObject();
+	void markInterned() { interned = true; }
+	bool isInternedNumber() const { return interned; }
+	void setNumber(const CNumber &n) { data = n; }
 private:
 	CNumber data;
+	bool interned;
 	friend define_newScriptVar_Fnc(Number, CTinyJS *Context, const CNumber &);
 	friend define_newScriptVar_NamedFnc(Number, CTinyJS *Context, const CNumber &);
 };
@@ -2164,6 +2168,8 @@ public:
 	const CScriptVarPtr &constScriptVar(bool Val)			{ return Val?constTrue:constFalse; }
 	const CScriptVarPtr &constScriptVar(NegativeZero_t)	{ return constNegativZero; }
 	const CScriptVarPtr &constScriptVar(StopIteration_t)	{ return constStopIteration; }
+	/// Shared CScriptVarNumber for small plain ints. Empty ptr → caller must allocate.
+	CScriptVarPtr getInternedSmallInt(const CNumber &n);
 
 private:
 	CScriptTokenizer *t;       /// current tokenizer
@@ -2216,6 +2222,9 @@ private:
 	CScriptVarPtr constFalse;
 	CScriptVarPtr constStopIteration;
 
+	enum { SMALL_INT_MIN = -1, SMALL_INT_MAX = 1024, SMALL_INT_COUNT = SMALL_INT_MAX - SMALL_INT_MIN + 1 };
+	CScriptVarPtr smallIntCache[SMALL_INT_COUNT];
+
 	std::vector<CScriptVarPtr *> pseudo_refered;
 
 	void CheckRightHandVar(CScriptResult &execute, CScriptVarLinkWorkPtr &link)
@@ -2243,7 +2252,9 @@ public:
 	//////////////////////////////////////////////////////////////////////////
 
 	// parsing - in order of precedence
-	CScriptVarPtr mathsOp(CScriptResult &execute, const CScriptVarPtr &a, const CScriptVarPtr &b, int op);
+	CScriptVarPtr mathsOp(CScriptResult &execute, const CScriptVarPtr &a, const CScriptVarPtr &b, int op, bool reuseLeft=false);
+	/// Box `result`. If allowReuse and candidate is a non-interned number with no other live CScriptVarPtrs, write in place.
+	CScriptVarPtr newNumberMaybeReuse(const CScriptVarPtr &candidate, const CScriptVarPtr &otherLocal, const CNumber &result, bool allowReuse);
 private:
 	void assign_destructuring_var(const CScriptVarPtr &Scope, const CScriptTokenDataDestructuringVar &Objc, const CScriptVarPtr &Val, CScriptResult &execute);
 	void execute_var_init(bool hideLetScope, CScriptResult &execute);

@@ -191,6 +191,14 @@ static std::string gen_strings(int count) {
 	return s;
 }
 
+static const char *kLoopSmall =
+	"var s = 0;\n"
+	"for (var i = 0; i < 20000; i++) {\n"
+	"  s = s + 1;\n"
+	"  if (s > 200) s = 0;\n"
+	"}\n"
+	"if (s !== 101) throw new Error('loop_small');\n";
+
 static const char *kLoopInt =
 	"var s = 0;\n"
 	"for (var i = 0; i < 20000; i++) s = s + i;\n"
@@ -296,6 +304,7 @@ int main(int argc, char **argv) {
 		bench_auto("lex_numbers", "lexer", [&]() { drain_lexer(nums.c_str()); });
 		bench_auto("lex_strings", "lexer", [&]() { drain_lexer(strs.c_str()); });
 
+		bench_file_or_src("loop_small", "tests/perf/loop_small.js", kLoopSmall);
 		bench_file_or_src("loop_int", "tests/perf/loop_int.js", kLoopInt);
 		bench_file_or_src("loop_prop", "tests/perf/loop_prop.js", kLoopProp);
 		bench_file_or_src("loop_call", "tests/perf/loop_call.js", kLoopCall);
