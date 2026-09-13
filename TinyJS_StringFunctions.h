@@ -27,8 +27,6 @@
  * SOFTWARE.
  */
 
-#pragma message("The include "__FILE__" is deprecated - StringFunctions now registered by default")
-
 #ifndef TINYJS_STRINGFUNCTIONS_H
 #define TINYJS_STRINGFUNCTIONS_H
 

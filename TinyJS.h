@@ -49,6 +49,7 @@
 #include <limits>
 
 #include "config.h"
+#include "TinyJS_Debug.h"
 
 #ifdef NO_POOL_ALLOCATOR
 	template<typename T, int num_objects=64>
@@ -64,7 +65,7 @@
 #		define new DEBUG_NEW
 #	endif
 #	define DEPRECATED(_Text) __declspec(deprecated(_Text))
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 #	define DEPRECATED(_Text) __attribute__ ((deprecated))
 #else
 #	define DEPRECATED(_Text)
@@ -98,6 +99,9 @@ enum LEX_TYPES {
 	LEX_MINUSMINUS,
 	LEX_ANDAND,
 	LEX_OROR,
+	LEX_ARROW,
+	LEX_OPTCHAIN,
+	LEX_NULLISH,
 	LEX_INT,
 	LEX_BIGINT,
 
@@ -302,6 +306,7 @@ public:
 	int currentLine() { return pos.currentLine; }
 	int currentColumn() { return pos.currentColumn(); }
 	bool lineBreakBeforeToken;
+	size_t sourceBytes() const { return data ? strlen(data) : 0; }
 private:
 	const char *data;
 	const char *dataPos;
@@ -365,7 +370,7 @@ private:
 
 class CScriptTokenDataFnc : public fixed_size_object<CScriptTokenDataFnc>, public CScriptTokenData {
 public:
-	CScriptTokenDataFnc() : line(0),isGenerator(false) {}
+	CScriptTokenDataFnc() : line(0),isGenerator(false),isArrow(false) {}
 	std::string file;
 	int line;
 	std::string name;
@@ -373,6 +378,7 @@ public:
 	TOKEN_VECT body;
 	std::string getArgumentsString();
 	bool isGenerator;
+	bool isArrow;
 };
 
 class CScriptTokenDataForwards : public fixed_size_object<CScriptTokenDataForwards>, public CScriptTokenData {
@@ -581,6 +587,9 @@ public:
 	bool check(int ExpectedToken, int AlternateToken=-1);
 	void match(int ExpectedToken, int AlternateToken=-1);
 	void pushTokenScope(TOKEN_VECT &Tokens);
+	void popTokenScope();
+	size_t tokenScopeDepth() const { return tokenScopeStack.size(); }
+	void unwindTokenScope(size_t depth);
 	ScriptTokenPosition &getPos() { return tokenScopeStack.back(); }
 	void setPos(ScriptTokenPosition &TokenPos);
 	ScriptTokenPosition &getPrevPos() { return prevPos; }
@@ -599,6 +608,8 @@ private:
 	void tokenizeFor(ScriptTokenState &State, int Flags);
 	CScriptToken tokenizeVarIdentifier(STRING_VECTOR_t *VarNames=0, bool *NeedAssignment=0);
 	void tokenizeFunction(ScriptTokenState &State, int Flags, bool noLetDef=false);
+	bool peekArrowAfterParen();
+	void tokenizeArrowFunction(ScriptTokenState &State, int Flags, CScriptToken *singleId=0);
 	void tokenizeLet(ScriptTokenState &State, int Flags, bool noLetDef=false);
 	void tokenizeVarNoConst(ScriptTokenState &State, int Flags);
 	void tokenizeVarAndConst(ScriptTokenState &State, int Flags);
@@ -609,7 +620,8 @@ private:
 	void tokenizeMember(ScriptTokenState &State, int Flags);
 	void tokenizeFunctionCall(ScriptTokenState &State, int Flags);
 	void tokenizeSubExpression(ScriptTokenState &State, int Flags);
-	void tokenizeLogic(ScriptTokenState &State, int Flags, int op= LEX_OROR, int op_n=LEX_ANDAND); 
+	void tokenizeLogic(ScriptTokenState &State, int Flags, int op= LEX_OROR, int op_n=LEX_ANDAND);
+	void tokenizeNullish(ScriptTokenState &State, int Flags);
 	void tokenizeCondition(ScriptTokenState &State, int Flags);
 	void tokenizeAssignment(ScriptTokenState &State, int Flags);
 	void tokenizeExpression(ScriptTokenState &State, int Flags);
@@ -796,7 +808,8 @@ public:
 	/// ARRAY
 	CScriptVarPtr getArrayIndex(uint32_t idx); ///< The the value at an array index
 	void setArrayIndex(uint32_t idx, const CScriptVarPtr &value); ///< Set the value at an array index
-	uint32_t getArrayLength(); ///< If this is an array, return the number of items in it (else 0)
+	virtual uint32_t getArrayLength(); ///< If this is an array, return the number of items in it (else 0)
+	void setArrayLength(uint32_t newLen); ///< ES5 [[DefineOwnProperty]] length: shrink deletes tail indexes
 	
 	//////////////////////////////////////////////////////////////////////////
 	int getChildren() { return static_cast<int>(Childs.size()); } ///< Get the number of children
@@ -827,6 +840,7 @@ public:
 	template<typename T>	const CScriptVarPtr &constScriptVar(T t); // { return ::newScriptVar(context, t); }
 	void setTemporaryMark(uint32_t ID); // defined as inline at end of this file { temporaryMark[context->getCurrentMarkSlot()] = ID; }
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot); ///< count JS / C++ member edges into temporaryMark[slot]
 	uint32_t getTemporaryMark(); // defined as inline at end of this file { return temporaryMark[context->getCurrentMarkSlot()]; }
 protected:
 	bool extensible;
@@ -1351,7 +1365,7 @@ define_ScriptVarPtr_Type(Number);
 class CScriptVarNumber : public CScriptVarPrimitive {
 protected:
 	CScriptVarNumber(CTinyJS *Context, const CNumber &Data);
-	CScriptVarNumber(const CScriptVarNumber &Copy) : CScriptVarPrimitive(Copy), data(Copy.data) {} ///< Copy protected -> use clone for public
+	CScriptVarNumber(const CScriptVarNumber &Copy) : CScriptVarPrimitive(Copy), data(Copy.data), interned(false) {} ///< Copy protected -> use clone for public
 public:
 	virtual ~CScriptVarNumber();
 	virtual CScriptVarPtr clone();
@@ -1369,8 +1383,12 @@ public:
 	virtual std::string getVarType(); // { return "number"; }
 
 	virtual CScriptVarPtr toObject();
+	void markInterned() { interned = true; }
+	bool isInternedNumber() const { return interned; }
+	void setNumber(const CNumber &n) { data = n; }
 private:
 	CNumber data;
+	bool interned;
 	friend define_newScriptVar_Fnc(Number, CTinyJS *Context, const CNumber &);
 	friend define_newScriptVar_NamedFnc(Number, CTinyJS *Context, const CNumber &);
 };
@@ -1456,6 +1474,7 @@ public:
 	virtual CScriptVarPtr valueOf_CallBack();
 	virtual CScriptVarPtr toString_CallBack(CScriptResult &execute, int radix=0);
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot);
 protected:
 private:
 	CScriptVarPrimitivePtr value;
@@ -1531,7 +1550,7 @@ define_ScriptVarPtr_Type(Array);
 class CScriptVarArray : public CScriptVarObject {
 protected:
 	CScriptVarArray(CTinyJS *Context);
-	CScriptVarArray(const CScriptVarArray &Copy) : CScriptVarObject(Copy), toStringRecursion(Copy.toStringRecursion) {} ///< Copy protected -> use clone for public
+	CScriptVarArray(const CScriptVarArray &Copy) : CScriptVarObject(Copy), toStringRecursion(Copy.toStringRecursion), explicitLength(Copy.explicitLength) {} ///< Copy protected -> use clone for public
 public:
 	virtual ~CScriptVarArray();
 	virtual CScriptVarPtr clone();
@@ -1540,11 +1559,16 @@ public:
 	virtual std::string getParsableString(const std::string &indentString, const std::string &indent, uint32_t uniqueID, bool &hasRecursion);
 
 	virtual CScriptVarPtr toString_CallBack(CScriptResult &execute, int radix=0);
+	virtual uint32_t getArrayLength();
+	void setExplicitLength(uint32_t n) { explicitLength = n; }
+	uint32_t getExplicitLength() const { return explicitLength; }
 
 	friend define_newScriptVar_Fnc(Array, CTinyJS *Context, Array_t);
 private:
 	void native_Length(const CFunctionsScopePtr &c, void *data);
+	void native_SetLength(const CFunctionsScopePtr &c, void *data);
 	bool toStringRecursion;
+	uint32_t explicitLength;
 };
 inline define_newScriptVar_Fnc(Array, CTinyJS *Context, Array_t) { return new CScriptVarArray(Context); } 
 
@@ -1631,12 +1655,14 @@ define_ScriptVarPtr_Type(FunctionBounded);
 class CScriptVarFunctionBounded : public CScriptVarFunction {
 protected:
 	CScriptVarFunctionBounded(CScriptVarFunctionPtr BoundedFunction, CScriptVarPtr BoundedThis, const std::vector<CScriptVarPtr> &BoundedArguments);
-	CScriptVarFunctionBounded(const CScriptVarFunctionBounded &Copy) : CScriptVarFunction(Copy), boundedThis(Copy.boundedThis), boundedArguments(Copy.boundedArguments)  { } ///< Copy protected -> use clone for public
+	CScriptVarFunctionBounded(const CScriptVarFunctionBounded &Copy) : CScriptVarFunction(Copy), boundedFunction(Copy.boundedFunction), boundedThis(Copy.boundedThis), boundedArguments(Copy.boundedArguments)  { } ///< Copy protected -> use clone for public
 public:
 	virtual ~CScriptVarFunctionBounded();
 	virtual CScriptVarPtr clone();
 	virtual bool isBounded();	///< is CScriptVarFunctionBounded
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot);
+	virtual void removeAllChildren();
 	CScriptVarPtr callFunction(CScriptResult &execute, std::vector<CScriptVarPtr> &Arguments, const CScriptVarPtr &This, CScriptVarPtr *newThis=0);
 protected:
 private:
@@ -1817,6 +1843,7 @@ public:
 	int getArgumentsLength(); ///< If this is a function, get the count of parameters
 
 	void throwError(ERROR_TYPES ErrorType, const std::string &message);
+	virtual void removeAllChildren();
 
 protected:
 	CScriptVarLinkPtr closure;
@@ -1841,6 +1868,7 @@ public:
 	virtual CScriptVarPtr scopeVar(); ///< to create var like: var a = ...
 	virtual CScriptVarScopePtr getParent();
 	void setletExpressionInitMode(bool Mode) { letExpressionInitMode = Mode; }
+	virtual void removeAllChildren();
 protected:
 	CScriptVarLinkPtr parent;
 	bool letExpressionInitMode;
@@ -1864,6 +1892,7 @@ public:
 	virtual ~CScriptVarScopeWith();
 	virtual CScriptVarPtr scopeLet(); ///< to create var like: let a = ...
 	virtual CScriptVarLinkWorkPtr findInScopes(const std::string &childName);
+	virtual void removeAllChildren();
 private:
 	CScriptVarLinkPtr with;
 	friend define_newScriptVar_Fnc(ScopeWith, CTinyJS *Context, ScopeWith_t, const CScriptVarScopePtr &Parent, const CScriptVarPtr &With);
@@ -1891,6 +1920,9 @@ public:
 	virtual bool isIterator();
 
 	void native_next(const CFunctionsScopePtr &c, void *data);
+	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot);
+	virtual void removeAllChildren();
 private:
 	int mode;
 	CScriptVarPtr object;
@@ -1929,6 +1961,7 @@ public:
 	CScriptVarFunctionPtr getFunction() { return function; }
 
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void gcAccountOutgoing(int slot);
 
 	void native_send(const CFunctionsScopePtr &c, void *data);
 	void native_throw(const CFunctionsScopePtr &c, void *data);
@@ -2035,6 +2068,8 @@ public:
 	void execute(CScriptTokenizer &Tokenizer);
 	void execute(const char *Code, const std::string &File="", int Line=0, int Column=0);
 	void execute(const std::string &Code, const std::string &File="", int Line=0, int Column=0);
+	/// Like eval/require: run Code in the caller scope (not the current native frame).
+	void executeInParentScope(const std::string &Code, const std::string &File);
 	/** Evaluate the given code and return a link to a javascript object,
 	 * useful for (dangerous) JSON parsing. If nothing to return, will return
 	 * 'undefined' variable type. CScriptVarLink is returned as this will
@@ -2106,7 +2141,20 @@ public:
 	void trace();
 
 	const CScriptVarScopePtr &getRoot() { return root; };   /// gets the root of symbol table
-	//	CScriptVar *root;   /// root of symbol table
+
+	// Debugger (no-op when debugEnabled() is false — one predicted branch per statement).
+	void setDebugEnabled(bool on);
+	bool debugEnabled() const { return debug_enabled_; }
+	CTinyJSDebug* debug() { return debug_; }
+	const CTinyJSDebug* debug() const { return debug_; }
+	void setDebugHook(CTinyJSDebugHook hook, void* user);
+	void requestPause();
+	void debugContinue();
+	void debugStepIn();
+	void debugStepOver();
+	void debugStepOut();
+
+	friend class CTinyJSDebug;
 
 	/// newVars & constVars
 	//CScriptVarPtr newScriptVar(const CNumber &t) { return ::newScriptVar(this, t); }
@@ -2120,10 +2168,14 @@ public:
 	const CScriptVarPtr &constScriptVar(bool Val)			{ return Val?constTrue:constFalse; }
 	const CScriptVarPtr &constScriptVar(NegativeZero_t)	{ return constNegativZero; }
 	const CScriptVarPtr &constScriptVar(StopIteration_t)	{ return constStopIteration; }
+	/// Shared CScriptVarNumber for small plain ints. Empty ptr → caller must allocate.
+	CScriptVarPtr getInternedSmallInt(const CNumber &n);
 
 private:
 	CScriptTokenizer *t;       /// current tokenizer
 	bool haveTry;
+	bool debug_enabled_;
+	CTinyJSDebug* debug_;
 	std::vector<CScriptVarScopePtr>scopes;
 	CScriptVarScopePtr root;
 	const CScriptVarScopePtr &scope() { return scopes.back(); }
@@ -2170,6 +2222,9 @@ private:
 	CScriptVarPtr constFalse;
 	CScriptVarPtr constStopIteration;
 
+	enum { SMALL_INT_MIN = -1, SMALL_INT_MAX = 1024, SMALL_INT_COUNT = SMALL_INT_MAX - SMALL_INT_MIN + 1 };
+	CScriptVarPtr smallIntCache[SMALL_INT_COUNT];
+
 	std::vector<CScriptVarPtr *> pseudo_refered;
 
 	void CheckRightHandVar(CScriptResult &execute, CScriptVarLinkWorkPtr &link)
@@ -2197,13 +2252,15 @@ public:
 	//////////////////////////////////////////////////////////////////////////
 
 	// parsing - in order of precedence
-	CScriptVarPtr mathsOp(CScriptResult &execute, const CScriptVarPtr &a, const CScriptVarPtr &b, int op);
+	CScriptVarPtr mathsOp(CScriptResult &execute, const CScriptVarPtr &a, const CScriptVarPtr &b, int op, bool reuseLeft=false);
+	/// Box `result`. If allowReuse and candidate is a non-interned number with no other live CScriptVarPtrs, write in place.
+	CScriptVarPtr newNumberMaybeReuse(const CScriptVarPtr &candidate, const CScriptVarPtr &otherLocal, const CNumber &result, bool allowReuse);
 private:
 	void assign_destructuring_var(const CScriptVarPtr &Scope, const CScriptTokenDataDestructuringVar &Objc, const CScriptVarPtr &Val, CScriptResult &execute);
 	void execute_var_init(bool hideLetScope, CScriptResult &execute);
 	void execute_destructuring(CScriptTokenDataObjectLiteral &Objc, const CScriptVarPtr &Val, CScriptResult &execute);
 	CScriptVarLinkWorkPtr execute_literals(CScriptResult &execute);
-	CScriptVarLinkWorkPtr execute_member(CScriptVarLinkWorkPtr &parent, CScriptResult &execute);
+	CScriptVarLinkWorkPtr execute_member(CScriptVarLinkWorkPtr &parent, CScriptResult &execute, bool &optionalElided);
 	CScriptVarLinkWorkPtr execute_function_call(CScriptResult &execute);
 	bool execute_unary_rhs(CScriptResult &execute, CScriptVarLinkWorkPtr& a);
 	CScriptVarLinkWorkPtr execute_unary(CScriptResult &execute);
@@ -2213,6 +2270,7 @@ private:
 	CScriptVarLinkWorkPtr execute_relation(CScriptResult &execute, int set=LEX_EQUAL, int set_n='<');
 	CScriptVarLinkWorkPtr execute_binary_logic(CScriptResult &execute, int op='|', int op_n1='^', int op_n2='&');
 	CScriptVarLinkWorkPtr execute_logic(CScriptResult &execute, int op=LEX_OROR, int op_n=LEX_ANDAND);
+	CScriptVarLinkWorkPtr execute_nullish(CScriptResult &execute);
 	CScriptVarLinkWorkPtr execute_condition(CScriptResult &execute);
 	CScriptVarLinkPtr execute_assignment(CScriptVarLinkWorkPtr Lhs, CScriptResult &execute);
 	CScriptVarLinkPtr execute_assignment(CScriptResult &execute);
@@ -2302,6 +2360,7 @@ private:
 
 	uint32_t uniqueID;
 	int32_t currentMarkSlot;
+	uint32_t allocsSinceGc;
 	void *stackBase;
 public:
 	int32_t getCurrentMarkSlot() {
@@ -2319,7 +2378,9 @@ public:
 	}
 	CScriptVar *first;
 	void setTemporaryID_recursive(uint32_t ID);
-	void ClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr());
+	void ClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr(), const CScriptVarPtr &extra2=CScriptVarPtr());
+	void maybeClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr(), const CScriptVarPtr &extra2=CScriptVarPtr());
+	void noteAlloc() { allocsSinceGc++; }
 	void setStackBase(void * StackBase) { stackBase = StackBase; }
 	void setStackBase(uint32_t StackSize) { char dummy; stackBase = StackSize ? &dummy-StackSize : 0; }
 };

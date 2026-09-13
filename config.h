@@ -131,21 +131,10 @@
 
 #if defined(NO_THREADING) && !defined(NO_GENERATORS)
 #	define NO_GENERATORS
-#pragma message("\n***********************************************************************\n\
-* You have defined NO_THREADING and not defined NO_GENERATORS\n\
-* NOTE: GENERATORS needs THREADING. Generators/Yield are deactivated\n\
-***********************************************************************\n")
 #endif
 
 #if defined(NO_POOL_ALLOCATOR) && defined(NO_GENERATORS) && !defined(NO_THREADING)
 #	define NO_THREADING
-#endif
-
-#if !defined(NO_POOL_ALLOCATOR) && defined(NO_THREADING)
-#pragma message("\n***********************************************************************\n\
-* You have defined NO_THREADING and not defined NO_POOL_ALLOCATOR\n\
-* NOTE: you can not run JS-code simultaneously in different threads\n\
-***********************************************************************\n")
 #endif
 
 #if defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L

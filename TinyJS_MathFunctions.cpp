@@ -42,6 +42,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <ctime>
+#include <cstdio>
 #include "TinyJS.h"
 
 using namespace std;
@@ -385,6 +386,35 @@ static void scMathSqrt(const CFunctionsScopePtr &c, void *userdata) {
 	RETURN( sqrt(a.toDouble()) );
 }
 
+static void scNumberToFixed(const CFunctionsScopePtr &c, void *) {
+	CNumber n = c->getArgument("this")->toNumber();
+	int digits = 0;
+	if (c->getArgumentsLength() >= 1)
+		digits = c->getArgument(0)->toNumber().toInt32();
+	if (digits < 0 || digits > 100)
+		c->throwError(RangeError, "toFixed() digits argument must be between 0 and 100");
+	if (n.isNaN()) {
+		c->setReturnVar(c->newScriptVar(std::string("NaN")));
+		return;
+	}
+	int inf = n.isInfinity();
+	if (inf > 0) {
+		c->setReturnVar(c->newScriptVar(std::string("Infinity")));
+		return;
+	}
+	if (inf < 0) {
+		c->setReturnVar(c->newScriptVar(std::string("-Infinity")));
+		return;
+	}
+	char buf[160];
+#if defined(_MSC_VER)
+	_snprintf_s(buf, sizeof(buf), _TRUNCATE, "%.*f", digits, n.toDouble());
+#else
+	snprintf(buf, sizeof(buf), "%.*f", digits, n.toDouble());
+#endif
+	c->setReturnVar(c->newScriptVar(std::string(buf)));
+}
+
 // ----------------------------------------------- Register Functions
 void registerMathFunctions(CTinyJS *tinyJS) {}
 extern "C" void _registerMathFunctions(CTinyJS *tinyJS) {
@@ -401,6 +431,7 @@ extern "C" void _registerMathFunctions(CTinyJS *tinyJS) {
 	 tinyJS->addNative("function Math.range(x,a,b)", scMathRange, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 	 tinyJS->addNative("function Math.sign(a)", scMathSign, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 	 tinyJS->addNative("function Math.random(a)", scMathRandom, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	 tinyJS->addNative("function Math.rand(a)", scMathRandom, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 
 
 // atan2, ceil, floor, random, round, 
@@ -436,6 +467,7 @@ extern "C" void _registerMathFunctions(CTinyJS *tinyJS) {
 	 tinyJS->addNative("function Math.pow(a,b)", scMathPow, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 	 
 	 tinyJS->addNative("function Math.sqr(a)", scMathSqr, 0, SCRIPTVARLINK_BUILDINDEFAULT);
-	 tinyJS->addNative("function Math.sqrt(a)", scMathSqrt, 0, SCRIPTVARLINK_BUILDINDEFAULT);    
-  
+	 tinyJS->addNative("function Math.sqrt(a)", scMathSqrt, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+
+	 tinyJS->addNative("function Number.prototype.toFixed(digits)", scNumberToFixed, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 }

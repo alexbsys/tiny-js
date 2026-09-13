@@ -314,17 +314,19 @@ int main(int argc, char **argv)
   printf("   -k needs press enter at the end of runs\n");
   int arg_num = 1;
   bool runs = false;
+  bool all_pass = true;
   for(; arg_num<argc; arg_num++) {
     if(argv[arg_num][0] == '-') {
       if(strcmp(argv[arg_num], "-k")==0)
 			end.active = true;
 	 } else {
-		run_test(argv[arg_num]);
+		if (!run_test(argv[arg_num]))
+			all_pass = false;
 		runs=true;
 	 }
   }
   if (runs) {
-    return 0;
+    return all_pass ? 0 : 1;
   }
 
   int count = 0;
@@ -354,6 +356,7 @@ int main(int argc, char **argv)
     }
   }
   printf("Done. %d tests, %d pass, %d fail\n", count, passed, count-passed);
+  if (count-passed) return 1;
 #ifdef WITH_TIME_LOGGER
   TimeLoggerLogprint(Tests);
 #endif
