@@ -49,6 +49,7 @@
 #include <limits>
 
 #include "config.h"
+#include "TinyJS_Debug.h"
 
 #ifdef NO_POOL_ALLOCATOR
 	template<typename T, int num_objects=64>
@@ -2035,6 +2036,8 @@ public:
 	void execute(CScriptTokenizer &Tokenizer);
 	void execute(const char *Code, const std::string &File="", int Line=0, int Column=0);
 	void execute(const std::string &Code, const std::string &File="", int Line=0, int Column=0);
+	/// Like eval/require: run Code in the caller scope (not the current native frame).
+	void executeInParentScope(const std::string &Code, const std::string &File);
 	/** Evaluate the given code and return a link to a javascript object,
 	 * useful for (dangerous) JSON parsing. If nothing to return, will return
 	 * 'undefined' variable type. CScriptVarLink is returned as this will
@@ -2106,7 +2109,20 @@ public:
 	void trace();
 
 	const CScriptVarScopePtr &getRoot() { return root; };   /// gets the root of symbol table
-	//	CScriptVar *root;   /// root of symbol table
+
+	// Debugger (no-op when debugEnabled() is false — one predicted branch per statement).
+	void setDebugEnabled(bool on);
+	bool debugEnabled() const { return debug_enabled_; }
+	CTinyJSDebug* debug() { return debug_; }
+	const CTinyJSDebug* debug() const { return debug_; }
+	void setDebugHook(CTinyJSDebugHook hook, void* user);
+	void requestPause();
+	void debugContinue();
+	void debugStepIn();
+	void debugStepOver();
+	void debugStepOut();
+
+	friend class CTinyJSDebug;
 
 	/// newVars & constVars
 	//CScriptVarPtr newScriptVar(const CNumber &t) { return ::newScriptVar(this, t); }
@@ -2124,6 +2140,8 @@ public:
 private:
 	CScriptTokenizer *t;       /// current tokenizer
 	bool haveTry;
+	bool debug_enabled_;
+	CTinyJSDebug* debug_;
 	std::vector<CScriptVarScopePtr>scopes;
 	CScriptVarScopePtr root;
 	const CScriptVarScopePtr &scope() { return scopes.back(); }

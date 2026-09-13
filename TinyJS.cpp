@@ -4348,10 +4348,48 @@ extern "C" void _registerFunctions(CTinyJS *tinyJS);
 extern "C" void _registerStringFunctions(CTinyJS *tinyJS);
 extern "C" void _registerMathFunctions(CTinyJS *tinyJS);
 
+void CTinyJS::setDebugEnabled(bool on) {
+	debug_enabled_ = on;
+	if (debug_)
+		debug_->setEnabled(on);
+}
+
+void CTinyJS::setDebugHook(CTinyJSDebugHook hook, void* user) {
+	if (debug_)
+		debug_->setHook(hook, user);
+}
+
+void CTinyJS::requestPause() {
+	if (debug_)
+		debug_->requestPause();
+}
+
+void CTinyJS::debugContinue() {
+	if (debug_)
+		debug_->debugContinue();
+}
+
+void CTinyJS::debugStepIn() {
+	if (debug_)
+		debug_->debugStepIn();
+}
+
+void CTinyJS::debugStepOver() {
+	if (debug_)
+		debug_->debugStepOver();
+}
+
+void CTinyJS::debugStepOut() {
+	if (debug_)
+		debug_->debugStepOut();
+}
+
 CTinyJS::CTinyJS() {
 	CScriptVarPtr var;
 	t = 0;
 	haveTry = false;
+	debug_enabled_ = false;
+	debug_ = new CTinyJSDebug();
 	first = 0;
 	uniqueID = 0;
 	currentMarkSlot = -1;
@@ -4577,6 +4615,8 @@ CTinyJS::CTinyJS() {
 }
 
 CTinyJS::~CTinyJS() {
+	delete debug_;
+	debug_ = 0;
 	ASSERT(!t);
 	for(vector<CScriptVarPtr*>::iterator it = pseudo_refered.begin(); it!=pseudo_refered.end(); ++it)
 		**it = CScriptVarPtr();
@@ -4600,6 +4640,8 @@ CTinyJS::~CTinyJS() {
 //////////////////////////////////////////////////////////////////////////
 
 void CTinyJS::throwError(CScriptResult &execute, ERROR_TYPES ErrorType, const string &message ) {
+	if (debug_enabled_ && debug_ && t)
+		debug_->onException(this, CTinyJSDebug::locFromTokenizer(this), message);
 	if(execute && haveTry) {
 		execute.set(CScriptResult::Throw, newScriptVarError(this, ErrorType, message.c_str(), t->currentFile.c_str(), t->currentLine(), t->currentColumn()));
 		return;
@@ -4607,10 +4649,19 @@ void CTinyJS::throwError(CScriptResult &execute, ERROR_TYPES ErrorType, const st
 	throw new CScriptException(ErrorType, message, t->currentFile, t->currentLine(), t->currentColumn());
 }
 void CTinyJS::throwException(ERROR_TYPES ErrorType, const string &message ) {
+	if (debug_enabled_ && debug_ && t)
+		debug_->onException(this, CTinyJSDebug::locFromTokenizer(this), message);
 	throw new CScriptException(ErrorType, message, t->currentFile, t->currentLine(), t->currentColumn());
 }
 
 void CTinyJS::throwError(CScriptResult &execute, ERROR_TYPES ErrorType, const string &message, CScriptTokenizer::ScriptTokenPosition &Pos ){
+	if (debug_enabled_ && debug_ && t) {
+		CTinyJSDebugLoc loc;
+		loc.file = t->currentFile;
+		loc.line = Pos.currentLine() + 1;
+		loc.column = Pos.currentColumn() + 1;
+		debug_->onException(this, loc, message);
+	}
 	if(execute && haveTry) {
 		execute.set(CScriptResult::Throw, newScriptVarError(this, ErrorType, message.c_str(), t->currentFile.c_str(), Pos.currentLine(), Pos.currentColumn()));
 		return;
@@ -4618,6 +4669,13 @@ void CTinyJS::throwError(CScriptResult &execute, ERROR_TYPES ErrorType, const st
 	throw new CScriptException(ErrorType, message, t->currentFile, Pos.currentLine(), Pos.currentColumn());
 }
 void CTinyJS::throwException(ERROR_TYPES ErrorType, const string &message, CScriptTokenizer::ScriptTokenPosition &Pos ){
+	if (debug_enabled_ && debug_ && t) {
+		CTinyJSDebugLoc loc;
+		loc.file = t->currentFile;
+		loc.line = Pos.currentLine() + 1;
+		loc.column = Pos.currentColumn() + 1;
+		debug_->onException(this, loc, message);
+	}
 	throw new CScriptException(ErrorType, message, t->currentFile, Pos.currentLine(), Pos.currentColumn());
 }
 
@@ -4639,7 +4697,33 @@ void CTinyJS::execute(const string &Code, const string &File, int Line, int Colu
 	evaluateComplex(Code, File, Line, Column);
 }
 
+void CTinyJS::executeInParentScope(const string &Code, const string &File) {
+	if (scopes.empty()) {
+		execute(Code, File);
+		return;
+	}
+	CScriptVarScopePtr nativeScope = scopes.back();
+	scopes.pop_back();
+	CScriptTokenizer *oldTokenizer = t;
+	CScriptResult exec;
+	try {
+		CScriptTokenizer Tokenizer(Code.c_str(), File);
+		t = &Tokenizer;
+		do {
+			execute_statement(exec);
+			while (t->tk == ';') t->match(';');
+		} while (t->tk != LEX_EOF);
+	} catch (...) {
+		t = oldTokenizer;
+		scopes.push_back(nativeScope);
+		throw;
+	}
+	t = oldTokenizer;
+	scopes.push_back(nativeScope);
+}
+
 CScriptVarLinkPtr CTinyJS::evaluateComplex(CScriptTokenizer &Tokenizer) {
+	CScriptTokenizer *old_t = t;
 	t = &Tokenizer;
 	CScriptResult execute;
 	try {
@@ -4648,11 +4732,17 @@ CScriptVarLinkPtr CTinyJS::evaluateComplex(CScriptTokenizer &Tokenizer) {
 			while (t->tk==';') t->match(';'); // skip empty statements
 		} while (t->tk!=LEX_EOF);
 	} catch (...) {
-		haveTry = false;
-		t=0; // clean up Tokenizer
-		throw; // 
+		if (!old_t)
+			haveTry = false;
+		t = old_t;
+		throw;
 	}
-	t=0;
+	t = old_t;
+	if (old_t) {
+		if (execute.value)
+			return CScriptVarLinkPtr(execute.value);
+		return CScriptVarLinkPtr(constScriptVar(Undefined));
+	}
 	ClearUnreferedVars(execute.value);
 
 	uint32_t UniqueID = allocUniqueID(); 
@@ -4792,6 +4882,22 @@ CScriptVarPtr CTinyJS::callFunction(CScriptResult &execute, const CScriptVarFunc
 	// add the function's execute space to the symbol table so we can recurse
 	CScopeControl ScopeControl(this);
 	ScopeControl.addFncScope(functionRoot);
+	const bool debug_frame = debug_enabled_ && debug_ && !Function->isNative();
+	if (debug_frame) {
+		CTinyJSDebugLoc call_loc;
+		call_loc.file = Fnc->file;
+		call_loc.line = Fnc->line + 1;
+		debug_->onCall(this, Fnc->name, call_loc, false);
+	}
+	struct DebugCallGuard {
+		CTinyJS* js;
+		bool armed;
+		DebugCallGuard(CTinyJS* j, bool a) : js(j), armed(a) {}
+		~DebugCallGuard() {
+			if (armed && js->debug_)
+				js->debug_->onReturn(js);
+		}
+	} debug_call_guard(this, debug_frame);
 	if (Function->isNative()) {
 		try {
 			CScriptVarFunctionNativePtr(Function)->callFunction(functionRoot);
@@ -5804,6 +5910,12 @@ void CTinyJS::execute_block(CScriptResult &execute) {
 		t->skip(t->getToken().Int());
 }
 void CTinyJS::execute_statement(CScriptResult &execute) {
+	// Expression statements are prefixed with a synthetic LEX_T_SKIP (line=0).
+	// Consume it before the debug hook so we stop on print()/native calls, not file:1.
+	if (execute && t->tk == LEX_T_SKIP)
+		t->match(LEX_T_SKIP);
+	if (debug_enabled_ && execute && debug_)
+		debug_->onStatement(this);
 	switch(t->tk) {
 	case '{':		/* A block of code */
 		execute_block(execute);
@@ -6091,6 +6203,13 @@ void CTinyJS::execute_statement(CScriptResult &execute) {
 			t->match(LEX_R_THROW);
 			CScriptVarPtr a = execute_base(execute);
 			if(execute) {
+				if (debug_enabled_ && debug_) {
+					CTinyJSDebugLoc loc;
+					loc.file = t->currentFile;
+					loc.line = tokenPos.currentLine() + 1;
+					loc.column = tokenPos.currentColumn() + 1;
+					debug_->onException(this, loc, "throw");
+				}
 				if(haveTry)
 					execute.setThrow(a, t->currentFile, tokenPos.currentLine(), tokenPos.currentColumn());
 				else

@@ -12,6 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON) #Optional
 set(TINYJS_SRCPATH "${CMAKE_CURRENT_LIST_DIR}")
 set(PRIVATE_SOURCES 
 "${TINYJS_SRCPATH}/TinyJS.cpp"
+"${TINYJS_SRCPATH}/TinyJS_Debug.cpp"
 "${TINYJS_SRCPATH}/TinyJS_Functions.cpp"
 "${TINYJS_SRCPATH}/TinyJS_MathFunctions.cpp"
 "${TINYJS_SRCPATH}/TinyJS_StringFunctions.cpp"
