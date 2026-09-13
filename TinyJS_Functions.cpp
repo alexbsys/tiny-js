@@ -43,6 +43,8 @@
 #include <algorithm>
 #include <set>
 #include <time.h>
+#include <cstdint>
+#include <cmath>
 #include "TinyJS.h"
 
 using namespace std;
@@ -228,6 +230,7 @@ static void scArrayRemove(const CFunctionsScopePtr &c, void *data) {
 				}	
 			}
 		}
+		arr->setArrayLength((uint32_t)next_insert);
 	}
 }
 
@@ -698,6 +701,389 @@ static void scObjectIsPrototypeOf(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(c->constScriptVar(false));
 }
 
+static CScriptVarPtr binBytesOf(const CScriptVarPtr &obj) {
+	if (!obj) return CScriptVarPtr();
+	CScriptVarLinkPtr link = obj->findChild("__bytes");
+	if (link) return link->getVarPtr();
+	return CScriptVarPtr();
+}
+
+static uint8_t binByteAt(const CScriptVarPtr &bytes, uint32_t i) {
+	if (!bytes) return 0;
+	CScriptVarPtr v = bytes->getArrayIndex(i);
+	if (!v) return 0;
+	return (uint8_t)(v->toNumber().toInt32() & 0xFF);
+}
+
+static void binByteSet(const CFunctionsScopePtr &c, const CScriptVarPtr &bytes, uint32_t i, int v) {
+	if (bytes)
+		bytes->setArrayIndex(i, c->newScriptVar(v & 0xFF));
+}
+
+static CScriptVarPtr binMakeBytes(const CFunctionsScopePtr &c, uint32_t n) {
+	CScriptVarPtr bytes = c->newScriptVar(Array);
+	for (uint32_t i = 0; i < n; ++i)
+		bytes->setArrayIndex(i, c->newScriptVar(0));
+	bytes->setArrayLength(n);
+	return bytes;
+}
+
+static CScriptVarPtr binMakeBuffer(const CFunctionsScopePtr &c, const CScriptVarPtr &bytes, uint32_t n) {
+	CScriptVarPtr buf = c->newScriptVar(Object);
+	buf->addChildOrReplace("byteLength", c->newScriptVar((int)n));
+	buf->addChildOrReplace("__bytes", bytes);
+	buf->addChildOrReplace("__isArrayBuffer", c->constScriptVar(true));
+	return buf;
+}
+
+static void binAttachView(const CScriptVarPtr &view, const CScriptVarPtr &buf, const CScriptVarPtr &bytes, uint32_t offset, uint32_t length, const CFunctionsScopePtr &c) {
+	view->addChildOrReplace("buffer", buf);
+	view->addChildOrReplace("byteOffset", c->newScriptVar((int)offset));
+	view->addChildOrReplace("byteLength", c->newScriptVar((int)length));
+	view->addChildOrReplace("length", c->newScriptVar((int)length));
+	view->addChildOrReplace("__bytes", bytes);
+}
+
+static bool binIsBuffer(const CScriptVarPtr &obj) {
+	return obj && obj->findChild("__isArrayBuffer");
+}
+
+static void scArrayBuffer(const CFunctionsScopePtr &c, void *) {
+	int32_t n = 0;
+	if (c->getArgumentsLength() >= 1)
+		n = c->getArgument(0)->toNumber().toInt32();
+	if (n < 0) c->throwError(RangeError, "Invalid array buffer length");
+	CScriptVarPtr bytes = binMakeBytes(c, (uint32_t)n);
+	CScriptVarPtr self = c->getArgument("this");
+	if (!self || self->isUndefined() || self->isNull())
+		self = c->newScriptVar(Object);
+	self->addChildOrReplace("byteLength", c->newScriptVar(n));
+	self->addChildOrReplace("__bytes", bytes);
+	self->addChildOrReplace("__isArrayBuffer", c->constScriptVar(true));
+	c->setReturnVar(self);
+}
+
+static void scUint8Array(const CFunctionsScopePtr &c, void *) {
+	int argc = c->getArgumentsLength();
+	CScriptVarPtr bytes;
+	CScriptVarPtr buf;
+	uint32_t offset = 0, length = 0;
+	if (argc < 1) {
+		bytes = binMakeBytes(c, 0);
+		buf = binMakeBuffer(c, bytes, 0);
+	} else {
+		CScriptVarPtr a0 = c->getArgument(0);
+		if (binIsBuffer(a0)) {
+			buf = a0;
+			bytes = binBytesOf(a0);
+			uint32_t cap = (uint32_t)a0->findChild("byteLength")->getVarPtr()->toNumber().toInt32();
+			offset = argc >= 2 ? (uint32_t)c->getArgument(1)->toNumber().toInt32() : 0;
+			length = argc >= 3 ? (uint32_t)c->getArgument(2)->toNumber().toInt32() : (cap > offset ? cap - offset : 0);
+			if (offset + length > cap)
+				c->throwError(RangeError, "Invalid typed array length");
+			if (offset == 0 && length == cap)
+				; // share
+			else {
+				CScriptVarPtr slice = binMakeBytes(c, length);
+				for (uint32_t i = 0; i < length; ++i)
+					binByteSet(c, slice, i, binByteAt(bytes, offset + i));
+				bytes = slice;
+				buf = binMakeBuffer(c, bytes, length);
+				offset = 0;
+			}
+		} else if (a0->isArray() || a0->findChild("length")) {
+			length = a0->getArrayLength();
+			if (a0->findChild("length") && !a0->isArray())
+				length = (uint32_t)a0->findChild("length")->getVarPtr()->toNumber().toInt32();
+			bytes = binMakeBytes(c, length);
+			for (uint32_t i = 0; i < length; ++i)
+				binByteSet(c, bytes, i, binByteAt(a0, i));
+			buf = binMakeBuffer(c, bytes, length);
+		} else {
+			int32_t n = a0->toNumber().toInt32();
+			if (n < 0) c->throwError(RangeError, "Invalid typed array length");
+			length = (uint32_t)n;
+			bytes = binMakeBytes(c, length);
+			buf = binMakeBuffer(c, bytes, length);
+		}
+	}
+	binAttachView(bytes, buf, bytes, offset, length ? length : bytes->getArrayLength(), c);
+	if (!length) length = bytes->getArrayLength();
+	bytes->setArrayLength(length);
+	CScriptVarLinkPtr ctor = c->getContext()->getRoot()->findChild("Uint8Array");
+	if (ctor) {
+		CScriptVarLinkPtr proto = ctor->getVarPtr()->findChild("prototype");
+		if (proto)
+			bytes->addChildOrReplace(TINYJS___PROTO___VAR, proto);
+	}
+	c->setReturnVar(bytes);
+}
+
+static void scUint8ArraySet(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr self = c->getArgument("this");
+	CScriptVarPtr bytes = binBytesOf(self);
+	if (!bytes) bytes = self;
+	uint32_t off = 0;
+	if (c->getArgumentsLength() >= 2)
+		off = (uint32_t)c->getArgument(1)->toNumber().toInt32();
+	CScriptVarPtr src = c->getArgument(0);
+	uint32_t n = src->getArrayLength();
+	if (src->findChild("length") && !src->isArray())
+		n = (uint32_t)src->findChild("length")->getVarPtr()->toNumber().toInt32();
+	for (uint32_t i = 0; i < n; ++i)
+		binByteSet(c, bytes, off + i, binByteAt(src, i));
+	c->setReturnVar(c->constScriptVar(Undefined));
+}
+
+static void scDataView(const CFunctionsScopePtr &c, void *) {
+	if (c->getArgumentsLength() < 1)
+		c->throwError(TypeError, "DataView requires an ArrayBuffer");
+	CScriptVarPtr buf = c->getArgument(0);
+	if (!binIsBuffer(buf))
+		c->throwError(TypeError, "First argument to DataView constructor must be an ArrayBuffer");
+	uint32_t cap = (uint32_t)buf->findChild("byteLength")->getVarPtr()->toNumber().toInt32();
+	uint32_t offset = 0, length = cap;
+	if (c->getArgumentsLength() >= 2)
+		offset = (uint32_t)c->getArgument(1)->toNumber().toInt32();
+	if (c->getArgumentsLength() >= 3)
+		length = (uint32_t)c->getArgument(2)->toNumber().toInt32();
+	else
+		length = cap > offset ? cap - offset : 0;
+	if (offset + length > cap)
+		c->throwError(RangeError, "Invalid DataView length");
+	CScriptVarPtr self = c->getArgument("this");
+	if (!self || self->isUndefined() || self->isNull())
+		self = c->newScriptVar(Object);
+	self->addChildOrReplace("buffer", buf);
+	self->addChildOrReplace("byteOffset", c->newScriptVar((int)offset));
+	self->addChildOrReplace("byteLength", c->newScriptVar((int)length));
+	c->setReturnVar(self);
+}
+
+static bool dvBounds(const CFunctionsScopePtr &c, uint32_t need, uint32_t &off, CScriptVarPtr &bytes) {
+	CScriptVarPtr self = c->getArgument("this");
+	CScriptVarPtr bufLink = self->findChild("buffer") ? self->findChild("buffer")->getVarPtr() : CScriptVarPtr();
+	bytes = binBytesOf(bufLink);
+	if (!bytes) { c->throwError(TypeError, "DataView is detached"); return false; }
+	uint32_t base = self->findChild("byteOffset") ? (uint32_t)self->findChild("byteOffset")->getVarPtr()->toNumber().toInt32() : 0;
+	uint32_t span = self->findChild("byteLength") ? (uint32_t)self->findChild("byteLength")->getVarPtr()->toNumber().toInt32() : 0;
+	off = base;
+	if (c->getArgumentsLength() >= 1)
+		off = base + (uint32_t)c->getArgument(0)->toNumber().toInt32();
+	if ((off - base) + need > span)
+		c->throwError(RangeError, "Offset is outside the bounds of the DataView");
+	return true;
+}
+
+static bool dvLE(const CFunctionsScopePtr &c, int endianArg) {
+	if (c->getArgumentsLength() > endianArg)
+		return c->getArgument(endianArg)->toBoolean();
+	return false;
+}
+
+static void scDataViewGetUint8(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 1, off, bytes)) return;
+	c->setReturnVar(c->newScriptVar((int)binByteAt(bytes, off)));
+}
+static void scDataViewGetInt8(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 1, off, bytes)) return;
+	int v = binByteAt(bytes, off);
+	if (v > 127) v -= 256;
+	c->setReturnVar(c->newScriptVar(v));
+}
+static void scDataViewSetUint8(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 1, off, bytes)) return;
+	int v = c->getArgumentsLength() >= 2 ? c->getArgument(1)->toNumber().toInt32() : 0;
+	binByteSet(c, bytes, off, v);
+	c->setReturnVar(c->constScriptVar(Undefined));
+}
+static void scDataViewSetInt8(const CFunctionsScopePtr &c, void *) { scDataViewSetUint8(c, 0); }
+
+static uint32_t dvReadU(const CScriptVarPtr &bytes, uint32_t off, int width, bool le) {
+	uint32_t v = 0;
+	for (int i = 0; i < width; ++i) {
+		uint8_t b = binByteAt(bytes, off + i);
+		if (le) v |= ((uint32_t)b) << (8 * i);
+		else v = (v << 8) | b;
+	}
+	return v;
+}
+static void dvWriteU(const CFunctionsScopePtr &c, const CScriptVarPtr &bytes, uint32_t off, int width, uint32_t v, bool le) {
+	for (int i = 0; i < width; ++i) {
+		int shift = le ? (8 * i) : (8 * (width - 1 - i));
+		binByteSet(c, bytes, off + i, (int)((v >> shift) & 0xFF));
+	}
+}
+
+static void scDataViewGetUint16(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 2, off, bytes)) return;
+	c->setReturnVar(c->newScriptVar((int)dvReadU(bytes, off, 2, dvLE(c, 1))));
+}
+static void scDataViewGetInt16(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 2, off, bytes)) return;
+	int v = (int)dvReadU(bytes, off, 2, dvLE(c, 1));
+	if (v > 32767) v -= 65536;
+	c->setReturnVar(c->newScriptVar(v));
+}
+static void scDataViewSetUint16(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 2, off, bytes)) return;
+	uint32_t v = c->getArgumentsLength() >= 2 ? (uint32_t)c->getArgument(1)->toNumber().toInt32() : 0;
+	dvWriteU(c, bytes, off, 2, v, dvLE(c, 2));
+	c->setReturnVar(c->constScriptVar(Undefined));
+}
+static void scDataViewSetInt16(const CFunctionsScopePtr &c, void *) { scDataViewSetUint16(c, 0); }
+
+static void scDataViewGetUint32(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 4, off, bytes)) return;
+	uint32_t v = dvReadU(bytes, off, 4, dvLE(c, 1));
+	c->setReturnVar(c->newScriptVar((int64_t)(uint64_t)v));
+}
+static void scDataViewGetInt32(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 4, off, bytes)) return;
+	int32_t v = (int32_t)dvReadU(bytes, off, 4, dvLE(c, 1));
+	c->setReturnVar(c->newScriptVar((int)v));
+}
+static void scDataViewSetUint32(const CFunctionsScopePtr &c, void *) {
+	uint32_t off; CScriptVarPtr bytes;
+	if (!dvBounds(c, 4, off, bytes)) return;
+	uint32_t v = 0;
+	if (c->getArgumentsLength() >= 2)
+		v = c->getArgument(1)->toNumber().toUInt32();
+	dvWriteU(c, bytes, off, 4, v, dvLE(c, 2));
+	c->setReturnVar(c->constScriptVar(Undefined));
+}
+static void scDataViewSetInt32(const CFunctionsScopePtr &c, void *) { scDataViewSetUint32(c, 0); }
+
+static CScriptVarPtr mapKeys(const CScriptVarPtr &m) {
+	CScriptVarLinkPtr k = m->findChild("__mk");
+	return k ? k->getVarPtr() : CScriptVarPtr();
+}
+static CScriptVarPtr mapVals(const CScriptVarPtr &m) {
+	CScriptVarLinkPtr v = m->findChild("__mv");
+	return v ? v->getVarPtr() : CScriptVarPtr();
+}
+static int mapIndexOf(const CScriptVarPtr &keys, const CScriptVarPtr &key) {
+	if (!keys || !key) return -1;
+	uint32_t n = keys->getArrayLength();
+	for (uint32_t i = 0; i < n; ++i) {
+		CScriptVarPtr k = keys->getArrayIndex(i);
+		if (k && k->mathsOp(key, LEX_TYPEEQUAL)->toBoolean())
+			return (int)i;
+	}
+	return -1;
+}
+
+static void scMap(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr self = c->getArgument("this");
+	if (!self || self->isUndefined() || self->isNull())
+		self = c->newScriptVar(Object);
+	self->addChildOrReplace("__mk", c->newScriptVar(Array));
+	self->addChildOrReplace("__mv", c->newScriptVar(Array));
+	self->addChildOrReplace("size", c->newScriptVar(0));
+	c->setReturnVar(self);
+}
+static void scMapSet(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr self = c->getArgument("this");
+	CScriptVarPtr keys = mapKeys(self), vals = mapVals(self);
+	if (!keys || !vals) c->throwError(TypeError, "Map.prototype.set called on incompatible Object");
+	CScriptVarPtr key = c->getArgument(0);
+	CScriptVarPtr val = c->getArgumentsLength() >= 2 ? c->getArgument(1) : c->constScriptVar(Undefined);
+	int idx = mapIndexOf(keys, key);
+	if (idx < 0) {
+		uint32_t n = keys->getArrayLength();
+		keys->setArrayIndex(n, key);
+		vals->setArrayIndex(n, val);
+		keys->setArrayLength(n + 1);
+		vals->setArrayLength(n + 1);
+		self->addChildOrReplace("size", c->newScriptVar((int)(n + 1)));
+	} else
+		vals->setArrayIndex((uint32_t)idx, val);
+	c->setReturnVar(self);
+}
+static void scMapGet(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr keys = mapKeys(c->getArgument("this")), vals = mapVals(c->getArgument("this"));
+	if (!keys || !vals) c->throwError(TypeError, "Map.prototype.get called on incompatible Object");
+	int idx = mapIndexOf(keys, c->getArgument(0));
+	c->setReturnVar(idx < 0 ? c->constScriptVar(Undefined) : vals->getArrayIndex((uint32_t)idx));
+}
+static void scMapHas(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr keys = mapKeys(c->getArgument("this"));
+	if (!keys) c->throwError(TypeError, "Map.prototype.has called on incompatible Object");
+	c->setReturnVar(c->constScriptVar(mapIndexOf(keys, c->getArgument(0)) >= 0));
+}
+static void scMapDelete(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr self = c->getArgument("this");
+	CScriptVarPtr keys = mapKeys(self), vals = mapVals(self);
+	if (!keys || !vals) c->throwError(TypeError, "Map.prototype.delete called on incompatible Object");
+	int idx = mapIndexOf(keys, c->getArgument(0));
+	if (idx < 0) { c->setReturnVar(c->constScriptVar(false)); return; }
+	uint32_t n = keys->getArrayLength();
+	for (uint32_t i = (uint32_t)idx; i + 1 < n; ++i) {
+		keys->setArrayIndex(i, keys->getArrayIndex(i + 1));
+		vals->setArrayIndex(i, vals->getArrayIndex(i + 1));
+	}
+	keys->setArrayLength(n - 1);
+	vals->setArrayLength(n - 1);
+	self->addChildOrReplace("size", c->newScriptVar((int)(n - 1)));
+	c->setReturnVar(c->constScriptVar(true));
+}
+static void scMapClear(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr self = c->getArgument("this");
+	self->addChildOrReplace("__mk", c->newScriptVar(Array));
+	self->addChildOrReplace("__mv", c->newScriptVar(Array));
+	self->addChildOrReplace("size", c->newScriptVar(0));
+	c->setReturnVar(c->constScriptVar(Undefined));
+}
+static void scMapIterNext(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr it = c->getArgument("this");
+	CScriptVarPtr map = it->findChild("__map") ? it->findChild("__map")->getVarPtr() : CScriptVarPtr();
+	CScriptVarPtr keys = mapKeys(map), vals = mapVals(map);
+	int i = it->findChild("__i") ? it->findChild("__i")->getVarPtr()->toNumber().toInt32() : 0;
+	if (!keys || i >= (int)keys->getArrayLength())
+		throw c->constScriptVar(StopIteration);
+	it->addChildOrReplace("__i", c->newScriptVar(i + 1));
+	CScriptVarPtr pair = c->newScriptVar(Array);
+	pair->setArrayIndex(0, keys->getArrayIndex((uint32_t)i));
+	pair->setArrayIndex(1, vals->getArrayIndex((uint32_t)i));
+	pair->setArrayLength(2);
+	c->setReturnVar(pair);
+}
+static void scMapIterator(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr it = c->newScriptVar(Object);
+	it->addChildOrReplace("__map", c->getArgument("this"));
+	it->addChildOrReplace("__i", c->newScriptVar(0));
+	it->addChildOrReplace("next", c->getContext()->newScriptVar(scMapIterNext, (void*)0, "MapIterator.next"));
+	c->setReturnVar(it);
+}
+
+static void scBigInt(const CFunctionsScopePtr &c, void *) {
+	if (c->getArgumentsLength() < 1)
+		c->throwError(TypeError, "Cannot convert undefined to a BigInt");
+	CScriptVarPtr a = c->getArgument(0);
+	CNumber n;
+	if (a->isString()) {
+		n.parseInt(a->toString().c_str(), 0);
+	} else {
+		n = a->toNumber();
+		if (n.isNaN() || n.isInfinity() || n.isDouble()) {
+			double d = n.toDouble();
+			if (n.isNaN() || n.isInfinity() || d != floor(d))
+				c->throwError(RangeError, "The number " + a->toString() + " cannot be converted to a BigInt");
+			n = CNumber((int64_t)d);
+		}
+	}
+	n.setBigInt(true);
+	c->setReturnVar(c->newScriptVar(n));
+}
+
 // ----------------------------------------------- Register Functions
 void registerFunctions(CTinyJS *tinyJS) {
 }
@@ -732,5 +1118,31 @@ extern "C" void _registerFunctions(CTinyJS *tinyJS) {
 	tinyJS->addNative("function Array.prototype.filter(callback, thisArg)", scArrayFilter, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 	tinyJS->addNative("function Array.prototype.reduce(callback, initial)", scArrayReduce, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 	tinyJS->addNative("function Array.prototype.reduceRight(callback, initial)", scArrayReduce, (void*)1, SCRIPTVARLINK_BUILDINDEFAULT);
+
+	tinyJS->addNative("function ArrayBuffer(length)", scArrayBuffer, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function Uint8Array(arg, byteOffset, length)", scUint8Array, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function Uint8Array.prototype.set(src, offset)", scUint8ArraySet, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView(buffer, byteOffset, byteLength)", scDataView, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.getUint8(byteOffset)", scDataViewGetUint8, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.getInt8(byteOffset)", scDataViewGetInt8, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.setUint8(byteOffset, value)", scDataViewSetUint8, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.setInt8(byteOffset, value)", scDataViewSetInt8, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.getUint16(byteOffset, littleEndian)", scDataViewGetUint16, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.getInt16(byteOffset, littleEndian)", scDataViewGetInt16, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.setUint16(byteOffset, value, littleEndian)", scDataViewSetUint16, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.setInt16(byteOffset, value, littleEndian)", scDataViewSetInt16, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.getUint32(byteOffset, littleEndian)", scDataViewGetUint32, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.getInt32(byteOffset, littleEndian)", scDataViewGetInt32, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.setUint32(byteOffset, value, littleEndian)", scDataViewSetUint32, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function DataView.prototype.setInt32(byteOffset, value, littleEndian)", scDataViewSetInt32, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function BigInt(value)", scBigInt, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+
+	tinyJS->addNative("function Map()", scMap, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function Map.prototype.set(key, value)", scMapSet, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function Map.prototype.get(key)", scMapGet, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function Map.prototype.has(key)", scMapHas, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function Map.prototype.delete(key)", scMapDelete, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function Map.prototype.clear()", scMapClear, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function Map.prototype.__iterator__()", scMapIterator, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 }
 

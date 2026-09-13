@@ -38,8 +38,6 @@
  * SOFTWARE.
  */
 
-#pragma message("The include "__FILE__" is deprecated - MathFunctions now registered by default")
-
 #ifndef TINYJS_MATHFUNCTIONS_H
 #define TINYJS_MATHFUNCTIONS_H
 

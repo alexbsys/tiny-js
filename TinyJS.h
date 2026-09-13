@@ -65,7 +65,7 @@
 #		define new DEBUG_NEW
 #	endif
 #	define DEPRECATED(_Text) __declspec(deprecated(_Text))
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 #	define DEPRECATED(_Text) __attribute__ ((deprecated))
 #else
 #	define DEPRECATED(_Text)
@@ -99,6 +99,9 @@ enum LEX_TYPES {
 	LEX_MINUSMINUS,
 	LEX_ANDAND,
 	LEX_OROR,
+	LEX_ARROW,
+	LEX_OPTCHAIN,
+	LEX_NULLISH,
 	LEX_INT,
 	LEX_BIGINT,
 
@@ -366,7 +369,7 @@ private:
 
 class CScriptTokenDataFnc : public fixed_size_object<CScriptTokenDataFnc>, public CScriptTokenData {
 public:
-	CScriptTokenDataFnc() : line(0),isGenerator(false) {}
+	CScriptTokenDataFnc() : line(0),isGenerator(false),isArrow(false) {}
 	std::string file;
 	int line;
 	std::string name;
@@ -374,6 +377,7 @@ public:
 	TOKEN_VECT body;
 	std::string getArgumentsString();
 	bool isGenerator;
+	bool isArrow;
 };
 
 class CScriptTokenDataForwards : public fixed_size_object<CScriptTokenDataForwards>, public CScriptTokenData {
@@ -603,6 +607,8 @@ private:
 	void tokenizeFor(ScriptTokenState &State, int Flags);
 	CScriptToken tokenizeVarIdentifier(STRING_VECTOR_t *VarNames=0, bool *NeedAssignment=0);
 	void tokenizeFunction(ScriptTokenState &State, int Flags, bool noLetDef=false);
+	bool peekArrowAfterParen();
+	void tokenizeArrowFunction(ScriptTokenState &State, int Flags, CScriptToken *singleId=0);
 	void tokenizeLet(ScriptTokenState &State, int Flags, bool noLetDef=false);
 	void tokenizeVarNoConst(ScriptTokenState &State, int Flags);
 	void tokenizeVarAndConst(ScriptTokenState &State, int Flags);
@@ -613,7 +619,8 @@ private:
 	void tokenizeMember(ScriptTokenState &State, int Flags);
 	void tokenizeFunctionCall(ScriptTokenState &State, int Flags);
 	void tokenizeSubExpression(ScriptTokenState &State, int Flags);
-	void tokenizeLogic(ScriptTokenState &State, int Flags, int op= LEX_OROR, int op_n=LEX_ANDAND); 
+	void tokenizeLogic(ScriptTokenState &State, int Flags, int op= LEX_OROR, int op_n=LEX_ANDAND);
+	void tokenizeNullish(ScriptTokenState &State, int Flags);
 	void tokenizeCondition(ScriptTokenState &State, int Flags);
 	void tokenizeAssignment(ScriptTokenState &State, int Flags);
 	void tokenizeExpression(ScriptTokenState &State, int Flags);
@@ -1641,12 +1648,13 @@ define_ScriptVarPtr_Type(FunctionBounded);
 class CScriptVarFunctionBounded : public CScriptVarFunction {
 protected:
 	CScriptVarFunctionBounded(CScriptVarFunctionPtr BoundedFunction, CScriptVarPtr BoundedThis, const std::vector<CScriptVarPtr> &BoundedArguments);
-	CScriptVarFunctionBounded(const CScriptVarFunctionBounded &Copy) : CScriptVarFunction(Copy), boundedThis(Copy.boundedThis), boundedArguments(Copy.boundedArguments)  { } ///< Copy protected -> use clone for public
+	CScriptVarFunctionBounded(const CScriptVarFunctionBounded &Copy) : CScriptVarFunction(Copy), boundedFunction(Copy.boundedFunction), boundedThis(Copy.boundedThis), boundedArguments(Copy.boundedArguments)  { } ///< Copy protected -> use clone for public
 public:
 	virtual ~CScriptVarFunctionBounded();
 	virtual CScriptVarPtr clone();
 	virtual bool isBounded();	///< is CScriptVarFunctionBounded
 	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void removeAllChildren();
 	CScriptVarPtr callFunction(CScriptResult &execute, std::vector<CScriptVarPtr> &Arguments, const CScriptVarPtr &This, CScriptVarPtr *newThis=0);
 protected:
 private:
@@ -1827,6 +1835,7 @@ public:
 	int getArgumentsLength(); ///< If this is a function, get the count of parameters
 
 	void throwError(ERROR_TYPES ErrorType, const std::string &message);
+	virtual void removeAllChildren();
 
 protected:
 	CScriptVarLinkPtr closure;
@@ -1851,6 +1860,7 @@ public:
 	virtual CScriptVarPtr scopeVar(); ///< to create var like: var a = ...
 	virtual CScriptVarScopePtr getParent();
 	void setletExpressionInitMode(bool Mode) { letExpressionInitMode = Mode; }
+	virtual void removeAllChildren();
 protected:
 	CScriptVarLinkPtr parent;
 	bool letExpressionInitMode;
@@ -1874,6 +1884,7 @@ public:
 	virtual ~CScriptVarScopeWith();
 	virtual CScriptVarPtr scopeLet(); ///< to create var like: let a = ...
 	virtual CScriptVarLinkWorkPtr findInScopes(const std::string &childName);
+	virtual void removeAllChildren();
 private:
 	CScriptVarLinkPtr with;
 	friend define_newScriptVar_Fnc(ScopeWith, CTinyJS *Context, ScopeWith_t, const CScriptVarScopePtr &Parent, const CScriptVarPtr &With);
@@ -1901,6 +1912,8 @@ public:
 	virtual bool isIterator();
 
 	void native_next(const CFunctionsScopePtr &c, void *data);
+	virtual void setTemporaryMark_recursive(uint32_t ID);
+	virtual void removeAllChildren();
 private:
 	int mode;
 	CScriptVarPtr object;
@@ -2230,7 +2243,7 @@ private:
 	void execute_var_init(bool hideLetScope, CScriptResult &execute);
 	void execute_destructuring(CScriptTokenDataObjectLiteral &Objc, const CScriptVarPtr &Val, CScriptResult &execute);
 	CScriptVarLinkWorkPtr execute_literals(CScriptResult &execute);
-	CScriptVarLinkWorkPtr execute_member(CScriptVarLinkWorkPtr &parent, CScriptResult &execute);
+	CScriptVarLinkWorkPtr execute_member(CScriptVarLinkWorkPtr &parent, CScriptResult &execute, bool &optionalElided);
 	CScriptVarLinkWorkPtr execute_function_call(CScriptResult &execute);
 	bool execute_unary_rhs(CScriptResult &execute, CScriptVarLinkWorkPtr& a);
 	CScriptVarLinkWorkPtr execute_unary(CScriptResult &execute);
@@ -2240,6 +2253,7 @@ private:
 	CScriptVarLinkWorkPtr execute_relation(CScriptResult &execute, int set=LEX_EQUAL, int set_n='<');
 	CScriptVarLinkWorkPtr execute_binary_logic(CScriptResult &execute, int op='|', int op_n1='^', int op_n2='&');
 	CScriptVarLinkWorkPtr execute_logic(CScriptResult &execute, int op=LEX_OROR, int op_n=LEX_ANDAND);
+	CScriptVarLinkWorkPtr execute_nullish(CScriptResult &execute);
 	CScriptVarLinkWorkPtr execute_condition(CScriptResult &execute);
 	CScriptVarLinkPtr execute_assignment(CScriptVarLinkWorkPtr Lhs, CScriptResult &execute);
 	CScriptVarLinkPtr execute_assignment(CScriptResult &execute);
@@ -2329,6 +2343,7 @@ private:
 
 	uint32_t uniqueID;
 	int32_t currentMarkSlot;
+	uint32_t gcDefer;
 	void *stackBase;
 public:
 	int32_t getCurrentMarkSlot() {
@@ -2347,6 +2362,7 @@ public:
 	CScriptVar *first;
 	void setTemporaryID_recursive(uint32_t ID);
 	void ClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr());
+	void maybeClearUnreferedVars(const CScriptVarPtr &extra=CScriptVarPtr());
 	void setStackBase(void * StackBase) { stackBase = StackBase; }
 	void setStackBase(uint32_t StackSize) { char dummy; stackBase = StackSize ? &dummy-StackSize : 0; }
 };

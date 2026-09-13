@@ -30,6 +30,14 @@ target_include_directories(tiny-js PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# std::thread / generators: Linux and some Android NDKs need -pthread.
+# Windows/MSVC: Threads::Threads is a no-op.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads)
+if(Threads_FOUND)
+  target_link_libraries(tiny-js PUBLIC Threads::Threads)
+endif()
+
 if(TINYJS_BUILD_TESTS)
   add_executable(tiny-js-tests "run_tests.cpp")
   target_link_libraries(tiny-js-tests tiny-js)

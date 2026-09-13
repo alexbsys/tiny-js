@@ -36,8 +36,6 @@
  * SOFTWARE.
  */
 
-#pragma message("The include "__FILE__" is deprecated - Functions now registered by default")
-
 #ifndef TINYJS_FUNCTIONS_H
 #define TINYJS_FUNCTIONS_H
 
