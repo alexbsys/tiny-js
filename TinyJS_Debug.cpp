@@ -131,12 +131,12 @@ CTinyJSDebugLoc CTinyJSDebug::locFromTokenizer(CTinyJS* js) {
     return loc;
   loc.file = js->t->currentFile;
 
-  const CScriptToken& tok = js->t->getToken();
+  CScriptToken& tok = js->t->getToken();
   loc.line = tok.line + 1;
   loc.column = tok.column + 1;
 
   if (tok.token == LEX_T_LOOP || tok.token == LEX_T_FOR_IN) {
-    const CScriptTokenDataLoop& loop = tok.Loop();
+    CScriptTokenDataLoop& loop = tok.Loop();
     if (!FillLocFromTokens(loc, loop.init) &&
         !FillLocFromTokens(loc, loop.condition) &&
         !FillLocFromTokens(loc, loop.body) &&
