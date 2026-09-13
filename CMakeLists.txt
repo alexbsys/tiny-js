@@ -16,6 +16,7 @@ set(PRIVATE_SOURCES
 "${TINYJS_SRCPATH}/TinyJS_Functions.cpp"
 "${TINYJS_SRCPATH}/TinyJS_MathFunctions.cpp"
 "${TINYJS_SRCPATH}/TinyJS_StringFunctions.cpp"
+"${TINYJS_SRCPATH}/TinyJS_Date.cpp"
 "${TINYJS_SRCPATH}/TinyJS_Threading.cpp"
 "${TINYJS_SRCPATH}/pool_allocator.cpp"
 )

@@ -582,6 +582,9 @@ public:
 	bool check(int ExpectedToken, int AlternateToken=-1);
 	void match(int ExpectedToken, int AlternateToken=-1);
 	void pushTokenScope(TOKEN_VECT &Tokens);
+	void popTokenScope();
+	size_t tokenScopeDepth() const { return tokenScopeStack.size(); }
+	void unwindTokenScope(size_t depth);
 	ScriptTokenPosition &getPos() { return tokenScopeStack.back(); }
 	void setPos(ScriptTokenPosition &TokenPos);
 	ScriptTokenPosition &getPrevPos() { return prevPos; }
@@ -797,7 +800,8 @@ public:
 	/// ARRAY
 	CScriptVarPtr getArrayIndex(uint32_t idx); ///< The the value at an array index
 	void setArrayIndex(uint32_t idx, const CScriptVarPtr &value); ///< Set the value at an array index
-	uint32_t getArrayLength(); ///< If this is an array, return the number of items in it (else 0)
+	virtual uint32_t getArrayLength(); ///< If this is an array, return the number of items in it (else 0)
+	void setArrayLength(uint32_t newLen); ///< ES5 [[DefineOwnProperty]] length: shrink deletes tail indexes
 	
 	//////////////////////////////////////////////////////////////////////////
 	int getChildren() { return static_cast<int>(Childs.size()); } ///< Get the number of children
@@ -1532,7 +1536,7 @@ define_ScriptVarPtr_Type(Array);
 class CScriptVarArray : public CScriptVarObject {
 protected:
 	CScriptVarArray(CTinyJS *Context);
-	CScriptVarArray(const CScriptVarArray &Copy) : CScriptVarObject(Copy), toStringRecursion(Copy.toStringRecursion) {} ///< Copy protected -> use clone for public
+	CScriptVarArray(const CScriptVarArray &Copy) : CScriptVarObject(Copy), toStringRecursion(Copy.toStringRecursion), explicitLength(Copy.explicitLength) {} ///< Copy protected -> use clone for public
 public:
 	virtual ~CScriptVarArray();
 	virtual CScriptVarPtr clone();
@@ -1541,11 +1545,16 @@ public:
 	virtual std::string getParsableString(const std::string &indentString, const std::string &indent, uint32_t uniqueID, bool &hasRecursion);
 
 	virtual CScriptVarPtr toString_CallBack(CScriptResult &execute, int radix=0);
+	virtual uint32_t getArrayLength();
+	void setExplicitLength(uint32_t n) { explicitLength = n; }
+	uint32_t getExplicitLength() const { return explicitLength; }
 
 	friend define_newScriptVar_Fnc(Array, CTinyJS *Context, Array_t);
 private:
 	void native_Length(const CFunctionsScopePtr &c, void *data);
+	void native_SetLength(const CFunctionsScopePtr &c, void *data);
 	bool toStringRecursion;
+	uint32_t explicitLength;
 };
 inline define_newScriptVar_Fnc(Array, CTinyJS *Context, Array_t) { return new CScriptVarArray(Context); } 
 

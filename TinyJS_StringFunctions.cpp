@@ -461,10 +461,12 @@ static void scCharToInt(const CFunctionsScopePtr &c, void *) {
 
 
 static void scStringFromCharCode(const CFunctionsScopePtr &c, void *) {
-	char str[2];
-	str[0] = c->getArgument("char")->toNumber().toInt32();
-	str[1] = 0;
-	c->setReturnVar(c->newScriptVar(str));
+	int n = c->getArgumentsLength();
+	string out;
+	out.reserve((size_t)n);
+	for (int i = 0; i < n; ++i)
+		out.push_back((char)c->getArgument(i)->toNumber().toInt32());
+	c->setReturnVar(c->newScriptVar(out));
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -559,7 +561,8 @@ extern "C" void _registerStringFunctions(CTinyJS *tinyJS) {
 
 	tinyJS->addNative("function charToInt(ch)", scCharToInt, 0, SCRIPTVARLINK_BUILDINDEFAULT); //  convert a character to an int - get its value
 	
-	tinyJS->addNative("function String.prototype.fromCharCode(char)", scStringFromCharCode, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function String.fromCharCode()", scStringFromCharCode, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	tinyJS->addNative("function String.prototype.fromCharCode()", scStringFromCharCode, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 #ifndef NO_REGEXP
 	tinyJS->addNative("function RegExp.prototype.test(str)", scRegExpTest, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 	tinyJS->addNative("function RegExp.prototype.exec(str)", scRegExpExec, 0, SCRIPTVARLINK_BUILDINDEFAULT);

@@ -903,18 +903,28 @@ static bool tokens2str_sorted = tokens2str_sort();
 
 CScriptToken::CScriptToken(CScriptLex *l, int Match, int Alternate) : line(l->currentLine()), column(l->currentColumn()), token(l->tk), int64Data(0)
 {
-	if(token == LEX_INT || token == LEX_BIGINT || LEX_TOKEN_DATA_FLOAT(token)) {
-		CNumber number(l->tkStr);
-		if (token == LEX_BIGINT) {
+	if(token == LEX_INT || token == LEX_BIGINT) {
+		// Integer / bigint literals must not go through strtod (IEEE rounding above 2^53).
+		CNumber number;
+		number.parseInt(l->tkStr.c_str(), 0);
+		if (token == LEX_BIGINT)
 			number.setBigInt(true);
-			int64Data = number.toInt64();
-		} else if(number.isInfinity())
+		if (number.isInfinity())
 			token=LEX_ID, (tokenData=new CScriptTokenDataString("Infinity"))->ref();
-		else if (number.isInt32() && token != LEX_BIGINT) {
-			token = LEX_INT, intData = number.toInt32();
-		} else {
+		else if (number.isDouble() || number.isNaN())
 			token = LEX_FLOAT, floatData = new double(number.toDouble());
-		}
+		else if (token == LEX_BIGINT || number.isBigInt())
+			token = LEX_BIGINT, int64Data = number.toInt64();
+		else
+			token = LEX_INT, intData = number.toInt32();
+	} else if(LEX_TOKEN_DATA_FLOAT(token)) {
+		CNumber number(l->tkStr);
+		if(number.isInfinity())
+			token=LEX_ID, (tokenData=new CScriptTokenDataString("Infinity"))->ref();
+		else if (number.isInt32() && !number.isBigInt())
+			token = LEX_INT, intData = number.toInt32();
+		else
+			token = LEX_FLOAT, floatData = new double(number.toDouble());
 	} else if(LEX_TOKEN_DATA_STRING(token))
 		(tokenData = new CScriptTokenDataString(l->tkStr))->ref();
 	else if(LEX_TOKEN_DATA_FUNCTION(token))
@@ -1206,6 +1216,16 @@ bool CScriptTokenizer::check(int ExpectedToken, int AlternateToken/*=-1*/) {
 }
 void CScriptTokenizer::pushTokenScope(TOKEN_VECT &Tokens) {
 	tokenScopeStack.push_back(ScriptTokenPosition(&Tokens));
+	tk = getToken().token;
+}
+void CScriptTokenizer::popTokenScope() {
+	ASSERT(tokenScopeStack.size() > 1);
+	tokenScopeStack.pop_back();
+	tk = getToken().token;
+}
+void CScriptTokenizer::unwindTokenScope(size_t depth) {
+	while (tokenScopeStack.size() > depth)
+		tokenScopeStack.pop_back();
 	tk = getToken().token;
 }
 
@@ -1819,6 +1839,8 @@ void CScriptTokenizer::_tokenizeLiteralObject(ScriptTokenState &State, int Flags
 		
 		if(!Objc.destructuring && msg.size())
 			throw new CScriptException(SyntaxError, msg, msgFile, msgLine, msgColumn);
+		if (!element.value.empty() && element.value.back().token != LEX_EOF)
+			element.value.push_back(CScriptToken(LEX_EOF));
 		Objc.elements.push_back(element);
 		if (l->tk != '}') l->match(',', '}');
 	}
@@ -1864,6 +1886,8 @@ void CScriptTokenizer::_tokenizeLiteralArray(ScriptTokenState &State, int Flags)
 			if(Objc.destructuring) Objc.destructuring = State.LeftHand;
 			State.popLeftHandeState();
 		}
+		if (!element.value.empty() && element.value.back().token != LEX_EOF)
+			element.value.push_back(CScriptToken(LEX_EOF));
 		Objc.elements.push_back(element);
 		if (l->tk != ']') l->match(',', ']');
 	}
@@ -2752,6 +2776,9 @@ void CScriptVar::setArrayIndex(uint32_t idx, const CScriptVarPtr &value) {
 	} else {
 		addChild(sIdx, value);
 	}
+	CScriptVarArray *arr = dynamic_cast<CScriptVarArray*>(this);
+	if (arr && idx + 1 > arr->getExplicitLength())
+		arr->setExplicitLength(idx + 1);
 }
 
 uint32_t CScriptVar::getArrayLength() {
@@ -2766,6 +2793,19 @@ uint32_t CScriptVar::getArrayLength() {
   }
 
   return isArrayIndex((*it)->getName())+1;
+}
+
+void CScriptVar::setArrayLength(uint32_t newLen) {
+	CScriptVarArray *arr = dynamic_cast<CScriptVarArray*>(this);
+	if (!arr) return;
+	uint32_t oldLen = getArrayLength();
+	if (newLen < oldLen) {
+		for (uint32_t i = newLen; i < oldLen; ++i) {
+			CScriptVarLinkPtr link = findChild(int2string(i));
+			if (link) removeLink(link);
+		}
+	}
+	arr->setExplicitLength(newLen);
 }
 
 CScriptVarPtr CScriptVar::mathsOp(const CScriptVarPtr &b, int op) {
@@ -2939,8 +2979,11 @@ CScriptVarLinkWorkPtr CScriptVarLinkWorkPtr::getter(CScriptResult &execute) {
 		CScriptVarLinkPtr getter = var->findChild(TINYJS_ACCESSOR_GET_VAR);
 		if(getter) {
 			vector<CScriptVarPtr> Params;
-			ASSERT(getReferencedOwner());
-			return getter->getVarPtr()->getContext()->callFunction(execute, getter->getVarPtr(), Params, getReferencedOwner());
+			CScriptVarPtr This = getReferencedOwner();
+			if (!This && link->getOwner())
+				This = link->getOwner();
+			ASSERT(This);
+			return getter->getVarPtr()->getContext()->callFunction(execute, getter->getVarPtr(), Params, This);
 		} else
 			return var->constScriptVar(Undefined);
 	} else
@@ -2965,8 +3008,11 @@ CScriptVarLinkWorkPtr CScriptVarLinkWorkPtr::setter( CScriptResult &execute, con
 				if(setter) {
 					vector<CScriptVarPtr> Params;
 					Params.push_back(Var);
-					ASSERT(getReferencedOwner());
-					setter->getVarPtr()->getContext()->callFunction(execute, setter->getVarPtr(), Params, getReferencedOwner());
+					CScriptVarPtr This = getReferencedOwner();
+					if (!This && link->getOwner())
+						This = link->getOwner();
+					ASSERT(This);
+					setter->getVarPtr()->getContext()->callFunction(execute, setter->getVarPtr(), Params, This);
 				}
 			} else
 				link->setVarPtr(Var);
@@ -3124,6 +3170,7 @@ CNumber &CNumber::operator=(const char *str) {
 }
 int64_t CNumber::parseInt(const char * str, int32_t radix/*=0*/, const char **endptr/*=0*/) {
   type=tInt64, Int64=0;
+	setBigInt(false);
 	if(endptr) *endptr = str;
 	bool stripPrefix = false; //< is true if radix==0 or radix==16
 	if(radix == 0) {
@@ -3140,39 +3187,57 @@ int64_t CNumber::parseInt(const char * str, int32_t radix/*=0*/, const char **en
 	else if(*str=='+') str++;
 	if(stripPrefix && *str=='0' && (str[1]=='x' || str[1]=='X')) str+=2, radix=16;
 	else if(stripPrefix && *str=='0' && str[1]>='0' && str[1]<='7') str+=1, radix=8;
-  int64_t max = 0x7fffffffffffffffLL/radix;
+	// Stay on int64 through INT64_MAX (and INT64_MIN when signed). Previous check
+	// converted to double one digit too early, so 2^63-1 lost precision.
+	const uint64_t limit = (sign < 0)
+		? (uint64_t)1 << 63
+		: (uint64_t)std::numeric_limits<int64_t>::max();
+	uint64_t acc = 0;
+	bool overflow = false;
 	const char *start = str;
-  for( ; *str; str++) {
-    if(*str >= '0' && *str <= '0'-1+radix) Int64 = Int64*radix+*str-'0';
-    else if(*str>='a' && *str<='a'-11+radix) Int64 = Int64*radix+*str-'a'+10;
-    else if(*str>='A' && *str<='A'-11+radix) Int64 = Int64*radix+*str-'A'+10;
-    else break;
-    if(Int64 >= max) {
-      type=tDouble, Double=double(Int64);
+	for( ; *str; str++) {
+		int digit;
+		if(*str >= '0' && *str <= '0'-1+radix) digit = *str-'0';
+		else if(*str>='a' && *str<='a'-11+radix) digit = *str-'a'+10;
+		else if(*str>='A' && *str<='A'-11+radix) digit = *str-'A'+10;
+		else break;
+		if (acc > (limit - (uint64_t)digit) / (uint64_t)radix) {
+			overflow = true;
+			type = tDouble;
+			Double = (double)acc * radix + digit;
 			for(str++ ; *str; str++) {
-				if(*str >= '0' && *str <= '0'-1+radix) Double = Double *radix+*str-'0';
-				else if(*str>='a' && *str<='a'-11+radix) Double = Double *radix+*str-'a'+10;
-				else if(*str>='A' && *str<='A'-11+radix) Double = Double *radix+*str-'A'+10;
+				int d2;
+				if(*str >= '0' && *str <= '0'-1+radix) d2 = *str-'0';
+				else if(*str>='a' && *str<='a'-11+radix) d2 = *str-'a'+10;
+				else if(*str>='A' && *str<='A'-11+radix) d2 = *str-'A'+10;
 				else break;
+				Double = Double * radix + d2;
 			}
 			break;
 		}
+		acc = acc * (uint64_t)radix + (uint64_t)digit;
 	}
 	if(str == start) {
 		type= tNaN;
 		return 0;
   }
-  if(sign<0 && ((type==tInt64 && Int64==0) || (type==tDouble && Double==0.0))) { type=tnNULL,Int64=0; return radix; }
-	if(type==tInt64) {
-		if (Int64 != Int32) {
+	if(overflow) {
+		operator=(sign<0 ? -Double : Double);
+	} else if(sign<0 && acc==0) {
+		type=tnNULL, Int64=0;
+	} else if(sign<0 && acc == ((uint64_t)1 << 63)) {
+		setBigInt(true);
+		type = tInt64;
+		Int64 = std::numeric_limits<int64_t>::min();
+	} else {
+		int64_t v = sign<0 ? -(int64_t)acc : (int64_t)acc;
+		if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max()) {
 			setBigInt(true);
-			operator=(sign<0 ? -Int64 : Int64);
+			operator=(v);
 		} else {
 			setBigInt(false);
-			operator=(sign<0 ? -Int32 : Int32);
+			operator=((int32_t)v);
 		}
-	} else {
-		operator=(sign<0 ? -Double : Double);
 	}
 	if(endptr) *endptr = (char*)str;
 	return radix;
@@ -3457,14 +3522,17 @@ char *tiny_ltoa(int64_t val, unsigned radix) {
 	buf_end = buf+64-1; // -1 for '\0'
 
 	p = buf;
+	uint64_t uval;
 	if (val < 0) {
 		*p++ = '-';
-		val = -val;
-	}
+		// Avoid UB on INT64_MIN: -INT64_MIN is not representable as int64_t.
+		uval = (uint64_t)(-(val + 1)) + 1;
+	} else
+		uval = (uint64_t)val;
 
 	do {
-    digval = (unsigned long long) (val % radix);
-		val /= radix;
+    digval = (unsigned) (uval % radix);
+		uval /= radix;
 		*p++ = (char) (digval + (digval > 9 ? ('a'-10) : '0'));
 		if(p==buf_end) {
 			char *new_buf = (char *)realloc(buf, buf_end-buf+16+1); // for '\0'
@@ -3473,7 +3541,7 @@ char *tiny_ltoa(int64_t val, unsigned radix) {
 			buf_end = p + 16;
 			buf = new_buf;
 		}
-	} while (val > 0);
+	} while (uval > 0);
 
 	// We now have the digit of the number in the buffer, but in reverse
 	// order.  Thus we reverse them now.
@@ -3786,11 +3854,10 @@ CScriptException *CScriptVarError::toCScriptException()
 //////////////////////////////////////////////////////////////////////////
 
 declare_dummy_t(Array);
-CScriptVarArray::CScriptVarArray(CTinyJS *Context) : CScriptVarObject(Context, Context->arrayPrototype), toStringRecursion(false) {
-	CScriptVarLinkPtr acc = addChild("length", newScriptVar(Accessor), 0);
-	CScriptVarFunctionPtr getter(::newScriptVar(Context, this, &CScriptVarArray::native_Length, 0));
-	getter->setFunctionData(new CScriptTokenDataFnc);
-	acc->getVarPtr()->addChild(TINYJS_ACCESSOR_GET_VAR, getter, 0);
+CScriptVarArray::CScriptVarArray(CTinyJS *Context) : CScriptVarObject(Context, Context->arrayPrototype), toStringRecursion(false), explicitLength(0) {
+	addChild("length", ::newScriptVarAccessor<CScriptVarArray>(Context, this,
+		&CScriptVarArray::native_Length, 0,
+		&CScriptVarArray::native_SetLength, 0), SCRIPTVARLINK_WRITABLE);
 }
 
 CScriptVarArray::~CScriptVarArray() {}
@@ -3827,8 +3894,10 @@ CScriptVarPtr CScriptVarArray::toString_CallBack( CScriptResult &execute, int ra
 	try {
 		int len = getArrayLength();
 		for (int i=0;i<len;i++) {
-			destination << getArrayIndex(i)->toString(execute);
-			if (i<len-1) destination  << ", ";
+			if (i>0) destination << ",";
+			CScriptVarPtr el = getArrayIndex(i);
+			if (el && !el->isUndefined() && !el->isNull())
+				destination << el->toString(execute);
 		}
 	} catch(...) {
 		toStringRecursion = false;
@@ -3839,8 +3908,22 @@ CScriptVarPtr CScriptVarArray::toString_CallBack( CScriptResult &execute, int ra
 
 }
 
+uint32_t CScriptVarArray::getArrayLength() {
+	uint32_t scanned = CScriptVar::getArrayLength();
+	return explicitLength > scanned ? explicitLength : scanned;
+}
+
 void CScriptVarArray::native_Length(const CFunctionsScopePtr &c, void *) {
 	c->setReturnVar(newScriptVar(c->getArgument("this")->getArrayLength()));
+}
+
+void CScriptVarArray::native_SetLength(const CFunctionsScopePtr &c, void *) {
+	CScriptVarPtr arr = c->getArgument("this");
+	CNumber num = c->getArgument(0)->toNumber();
+	uint32_t newLen = num.toUInt32();
+	if (!num.isFinite() || num != CNumber(newLen))
+		c->throwError(RangeError, "Invalid array length");
+	arr->setArrayLength(newLen);
 }
 
 
@@ -4347,6 +4430,7 @@ CScriptVarLinkWorkPtr CScriptVarScopeWith::findInScopes(const string &childName)
 extern "C" void _registerFunctions(CTinyJS *tinyJS);
 extern "C" void _registerStringFunctions(CTinyJS *tinyJS);
 extern "C" void _registerMathFunctions(CTinyJS *tinyJS);
+extern "C" void _registerDateFunctions(CTinyJS *tinyJS);
 
 void CTinyJS::setDebugEnabled(bool on) {
 	debug_enabled_ = on;
@@ -4425,7 +4509,8 @@ CTinyJS::CTinyJS() {
 	addNative("function Object.getPrototypeOf(obj)", this, &CTinyJS::native_Object_getPrototypeOf); 
 	addNative("function Object.preventExtensions(obj)", this, &CTinyJS::native_Object_setObjectSecure); 
 	addNative("function Object.isExtensible(obj)", this, &CTinyJS::native_Object_isSecureObject); 
-	addNative("function Object.seel(obj)", this, &CTinyJS::native_Object_setObjectSecure, (void*)1); 
+	addNative("function Object.seal(obj)", this, &CTinyJS::native_Object_setObjectSecure, (void*)1);
+	addNative("function Object.seel(obj)", this, &CTinyJS::native_Object_setObjectSecure, (void*)1); // legacy typo alias
 	addNative("function Object.isSealed(obj)", this, &CTinyJS::native_Object_isSecureObject, (void*)1); 
 	addNative("function Object.freeze(obj)", this, &CTinyJS::native_Object_setObjectSecure, (void*)2); 
 	addNative("function Object.isFrozen(obj)", this, &CTinyJS::native_Object_isSecureObject, (void*)2); 
@@ -4612,6 +4697,7 @@ CTinyJS::CTinyJS() {
 	_registerFunctions(this);
 	_registerStringFunctions(this);
 	_registerMathFunctions(this);
+	_registerDateFunctions(this);
 }
 
 CTinyJS::~CTinyJS() {
@@ -4829,7 +4915,15 @@ CScriptVarLinkWorkPtr CTinyJS::parseFunctionDefinition(const CScriptToken &FncTo
 }
 
 CScriptVarLinkWorkPtr CTinyJS::parseFunctionsBodyFromString(const string &ArgumentList, const string &FncBody) {
-	string Fnc = "function ("+ArgumentList+"){"+FncBody+"}";
+	// 0xA7 tells the tokenizer this is an expression, not a function statement
+	// (statements require a name and get forwarded as placeholders).
+	string Fnc;
+	Fnc.push_back((char)0xA7);
+	Fnc.append("function (");
+	Fnc.append(ArgumentList);
+	Fnc.append("){");
+	Fnc.append(FncBody);
+	Fnc.append("}");
 	CScriptTokenizer tokenizer(Fnc.c_str());
 	return parseFunctionDefinition(tokenizer.getToken());
 }
@@ -5113,9 +5207,9 @@ CScriptVarPtr CTinyJS::generator_yield(CScriptResult &execute, CScriptVar *Yield
 CScriptVarPtr CTinyJS::mathsOp(CScriptResult &execute, const CScriptVarPtr &A, const CScriptVarPtr &B, int op) {
 	if(!execute) return constUndefined;
 	if (op == LEX_TYPEEQUAL || op == LEX_NTYPEEQUAL) {
-		// check type first
-		if( (A->getVarType() == B->getVarType()) ^ (op == LEX_TYPEEQUAL)) return constFalse;
-		// check value second
+		// === / !== must not coerce. Different types: === false, !== true.
+		if (A->getVarType() != B->getVarType())
+			return constScriptVar(op == LEX_NTYPEEQUAL);
 		return mathsOp(execute, A, B, op == LEX_TYPEEQUAL ? LEX_EQUAL : LEX_NEQUAL);
 	}
 	if (!A->isPrimitive() && !B->isPrimitive()) { // Objects both
@@ -5249,8 +5343,10 @@ void CTinyJS::execute_destructuring(CScriptTokenDataObjectLiteral &Objc, const C
 		if(it->value.front().token == LEX_T_OBJECT_LITERAL && it->value.front().Object().destructuring) {
 			execute_destructuring(it->value.front().Object(), rhs, execute);
 		} else {
+			size_t scopeDepth = t->tokenScopeDepth();
 			t->pushTokenScope(it->value);
 			CScriptVarLinkWorkPtr lhs = execute_condition(execute);
+			t->unwindTokenScope(scopeDepth);
 			if(lhs->isWritable()) {
 				if (!lhs->isOwned()) {
 					CScriptVarPtr fakedOwner = lhs.getReferencedOwner();
@@ -5358,9 +5454,10 @@ CScriptVarLinkWorkPtr CTinyJS::execute_literals(CScriptResult &execute) {
 							child->getVarPtr()->addChildOrReplace((tk.token==LEX_T_GET?TINYJS_ACCESSOR_GET_VAR:TINYJS_ACCESSOR_SET_VAR), funcVar->getVarPtr());
 						}
 					} else {
+						size_t scopeDepth = t->tokenScopeDepth();
 						t->pushTokenScope(it->value);
 						a->addChildOrReplace(it->id, execute_assignment(execute));
-						while(0);
+						t->unwindTokenScope(scopeDepth);
 					}
 				}
 				return a;
@@ -5416,10 +5513,9 @@ CScriptVarLinkWorkPtr CTinyJS::execute_literals(CScriptResult &execute) {
 				if(Constructor->isFunction()) {
 					CScriptVarPtr obj(newScriptVar(Object));
 					CScriptVarLinkPtr prototype = Constructor->findChild(TINYJS_PROTOTYPE_CLASS);
-					if(!prototype || prototype->getVarPtr()->isUndefined() || prototype->getVarPtr()->isNull()) {
+					if(!prototype || prototype->getVarPtr()->isUndefined() || prototype->getVarPtr()->isNull())
 						prototype = Constructor->addChild(TINYJS_PROTOTYPE_CLASS, newScriptVar(Object), SCRIPTVARLINK_WRITABLE);
-						obj->addChildOrReplace(TINYJS___PROTO___VAR, prototype, SCRIPTVARLINK_WRITABLE);
-					}
+					obj->addChildOrReplace(TINYJS___PROTO___VAR, prototype, SCRIPTVARLINK_WRITABLE);
 					CScriptVarLinkPtr __constructor__ = Constructor->findChild("__constructor__");
 					if(__constructor__ && __constructor__->getVarPtr()->isFunction())
 						Constructor = __constructor__;
@@ -5510,6 +5606,8 @@ CScriptVarLinkWorkPtr CTinyJS::execute_member(CScriptVarLinkWorkPtr &parent, CSc
 				if(!a) {
 					a(constScriptVar(Undefined), name);
 					a.setReferencedOwner(aVar);
+				} else if (!a.hasReferencedOwner()) {
+					a.setReferencedOwner(aVar);
 				}
 			}
 		}
@@ -5596,8 +5694,17 @@ CScriptVarLinkWorkPtr CTinyJS::execute_unary(CScriptResult &execute) {
 			a = newScriptVar(~a->getVarPtr()->toNumber(execute));
 		break;
 	case LEX_R_TYPEOF:
-		if(execute_unary_rhs(execute, a)) 
-			a = newScriptVar(a->getVarPtr()->getVarType());
+		t->match(LEX_R_TYPEOF);
+		a = execute_unary(execute).getter(execute);
+		if (execute) {
+			CScriptVarPtr typeVar = a ? a->getVarPtr() : CScriptVarPtr();
+			if (!typeVar)
+				a = newScriptVar(std::string("undefined"));
+			else if (typeVar->isNull())
+				a = newScriptVar(std::string("object"));
+			else
+				a = newScriptVar(typeVar->getVarType());
+		}
 		break;
 	case LEX_R_VOID:
 		if(execute_unary_rhs(execute, a)) 
@@ -6483,7 +6590,7 @@ void CTinyJS::native_Array(const CFunctionsScopePtr &c, void *data) {
 		CNumber Argument_0 = Argument_0_Var->toNumber();
 		uint32_t new_size = Argument_0.toUInt32();
 		if(Argument_0.isFinite() && Argument_0 == new_size)
-			returnVar->setArrayIndex(new_size-1, constScriptVar(Undefined));
+			returnVar->setArrayLength(new_size);
 		else
 			c->throwError(RangeError, "invalid array length");
 	} else for(int i=0; i<length; i++)
@@ -6766,26 +6873,194 @@ void CTinyJS::native_parseFloat(const CFunctionsScopePtr &c, void *) {
 
 
 
-void CTinyJS::native_JSON_parse(const CFunctionsScopePtr &c, void *) {
-	char kSpecialCharacter = static_cast<char>(0xA7);
-  string Code = kSpecialCharacter + c->getArgument("text")->toString();
-	// 0xA7 is a spezal-token - it's for the tokenizer and means the code begins not in Statement-level
-	CScriptVarLinkWorkPtr returnVar;
-	CScriptTokenizer *oldTokenizer = t; t=0;
-	try {
-		CScriptTokenizer Tokenizer(Code.c_str(), "JSON.parse", 0, -1);
-		t = &Tokenizer;
-		CScriptResult execute;
-		returnVar = execute_literals(execute);
-		t->match(LEX_EOF);
-	} catch (CScriptException *e) {
-		t = oldTokenizer;
-		throw e;
+namespace {
+struct JsonParser {
+	CTinyJS *ctx;
+	const string *src;
+	size_t i;
+	void error(const char *msg) {
+		throw newScriptVarError(ctx, SyntaxError, msg);
 	}
-	t = oldTokenizer;
+	void skip() {
+		while (i < src->size()) {
+			char ch = (*src)[i];
+			if (ch==' ' || ch=='\t' || ch=='\n' || ch=='\r') ++i;
+			else break;
+		}
+	}
+	char peek() {
+		skip();
+		return i < src->size() ? (*src)[i] : 0;
+	}
+	void expect(char ch) {
+		skip();
+		if (i >= src->size() || (*src)[i] != ch)
+			error("JSON.parse: unexpected token");
+		++i;
+	}
+	CScriptVarPtr parseValue();
+	CScriptVarPtr parseObject();
+	CScriptVarPtr parseArray();
+	CScriptVarPtr parseString();
+	CScriptVarPtr parseNumber();
+};
 
-	if(returnVar)
-		c->setReturnVar(returnVar);
+static unsigned hexVal(char ch) {
+	if (ch>='0' && ch<='9') return (unsigned)(ch-'0');
+	if (ch>='a' && ch<='f') return (unsigned)(ch-'a'+10);
+	if (ch>='A' && ch<='F') return (unsigned)(ch-'A'+10);
+	return 0x100;
+}
+
+CScriptVarPtr JsonParser::parseString() {
+	expect('"');
+	string out;
+	while (i < src->size()) {
+		unsigned char ch = (unsigned char)(*src)[i++];
+		if (ch == '"') return ctx->newScriptVar(out);
+		if (ch == '\\') {
+			if (i >= src->size()) error("JSON.parse: unterminated string");
+			char esc = (*src)[i++];
+			switch (esc) {
+			case '"': case '\\': case '/': out.push_back(esc); break;
+			case 'b': out.push_back('\b'); break;
+			case 'f': out.push_back('\f'); break;
+			case 'n': out.push_back('\n'); break;
+			case 'r': out.push_back('\r'); break;
+			case 't': out.push_back('\t'); break;
+			case 'u': {
+				if (i + 4 > src->size()) error("JSON.parse: bad unicode escape");
+				unsigned code = 0;
+				for (int n = 0; n < 4; ++n) {
+					unsigned v = hexVal((*src)[i++]);
+					if (v > 15) error("JSON.parse: bad unicode escape");
+					code = (code << 4) | v;
+				}
+				if (code < 0x80) out.push_back((char)code);
+				else if (code < 0x800) {
+					out.push_back((char)(0xC0 | (code >> 6)));
+					out.push_back((char)(0x80 | (code & 0x3F)));
+				} else {
+					out.push_back((char)(0xE0 | (code >> 12)));
+					out.push_back((char)(0x80 | ((code >> 6) & 0x3F)));
+					out.push_back((char)(0x80 | (code & 0x3F)));
+				}
+				break;
+			}
+			default:
+				error("JSON.parse: bad escape");
+			}
+		} else if (ch < 0x20) {
+			error("JSON.parse: unescaped control character");
+		} else {
+			out.push_back((char)ch);
+		}
+	}
+	error("JSON.parse: unterminated string");
+	return ctx->constScriptVar(Undefined);
+}
+
+CScriptVarPtr JsonParser::parseNumber() {
+	skip();
+	size_t start = i;
+	if (i < src->size() && (*src)[i] == '-') ++i;
+	if (i >= src->size() || !isNumeric((*src)[i]))
+		error("JSON.parse: bad number");
+	if ((*src)[i] == '0') {
+		++i;
+		if (i < src->size() && isNumeric((*src)[i]))
+			error("JSON.parse: leading zero");
+	} else {
+		while (i < src->size() && isNumeric((*src)[i])) ++i;
+	}
+	if (i < src->size() && (*src)[i] == '.') {
+		++i;
+		if (i >= src->size() || !isNumeric((*src)[i]))
+			error("JSON.parse: bad number");
+		while (i < src->size() && isNumeric((*src)[i])) ++i;
+	}
+	if (i < src->size() && ((*src)[i] == 'e' || (*src)[i] == 'E')) {
+		++i;
+		if (i < src->size() && ((*src)[i] == '+' || (*src)[i] == '-')) ++i;
+		if (i >= src->size() || !isNumeric((*src)[i]))
+			error("JSON.parse: bad number");
+		while (i < src->size() && isNumeric((*src)[i])) ++i;
+	}
+	string tok = src->substr(start, i - start);
+	bool isInteger = tok.find('.') == string::npos && tok.find('e') == string::npos && tok.find('E') == string::npos;
+	CNumber num;
+	if (isInteger)
+		num.parseInt(tok.c_str(), 10);
+	else
+		num.parseFloat(tok.c_str());
+	return ctx->newScriptVar(num);
+}
+
+CScriptVarPtr JsonParser::parseArray() {
+	expect('[');
+	CScriptVarPtr arr = ctx->newScriptVar(Array);
+	uint32_t idx = 0;
+	if (peek() == ']') {
+		++i;
+		return arr;
+	}
+	for (;;) {
+		arr->setArrayIndex(idx++, parseValue());
+		char ch = peek();
+		if (ch == ']') { ++i; break; }
+		if (ch != ',') error("JSON.parse: expected ',' or ']'");
+		++i;
+		if (peek() == ']') error("JSON.parse: trailing comma");
+	}
+	return arr;
+}
+
+CScriptVarPtr JsonParser::parseObject() {
+	expect('{');
+	CScriptVarPtr obj = ctx->newScriptVar(Object);
+	if (peek() == '}') {
+		++i;
+		return obj;
+	}
+	for (;;) {
+		if (peek() != '"') error("JSON.parse: object key must be a string");
+		CScriptVarPtr key = parseString();
+		expect(':');
+		obj->addChildOrReplace(key->toString(), parseValue());
+		char ch = peek();
+		if (ch == '}') { ++i; break; }
+		if (ch != ',') error("JSON.parse: expected ',' or '}'");
+		++i;
+		if (peek() == '}') error("JSON.parse: trailing comma");
+	}
+	return obj;
+}
+
+CScriptVarPtr JsonParser::parseValue() {
+	char ch = peek();
+	if (ch == '"') return parseString();
+	if (ch == '{') return parseObject();
+	if (ch == '[') return parseArray();
+	if (ch == '-' || isNumeric(ch)) return parseNumber();
+	if (src->compare(i, 4, "true") == 0) { i += 4; return ctx->constScriptVar(true); }
+	if (src->compare(i, 5, "false") == 0) { i += 5; return ctx->constScriptVar(false); }
+	if (src->compare(i, 4, "null") == 0) { i += 4; return ctx->constScriptVar(Null); }
+	error("JSON.parse: unexpected token");
+	return ctx->constScriptVar(Undefined);
+}
+} // namespace
+
+void CTinyJS::native_JSON_parse(const CFunctionsScopePtr &c, void *) {
+	string text = c->getArgument("text")->toString();
+	JsonParser p;
+	p.ctx = this;
+	p.src = &text;
+	p.i = 0;
+	CScriptVarPtr value = p.parseValue();
+	p.skip();
+	if (p.i != text.size())
+		c->throwError(SyntaxError, "JSON.parse: unexpected extra data");
+	c->setReturnVar(value);
 }
 
 void CTinyJS::setTemporaryID_recursive(uint32_t ID) {

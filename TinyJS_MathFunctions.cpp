@@ -401,6 +401,7 @@ extern "C" void _registerMathFunctions(CTinyJS *tinyJS) {
 	 tinyJS->addNative("function Math.range(x,a,b)", scMathRange, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 	 tinyJS->addNative("function Math.sign(a)", scMathSign, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 	 tinyJS->addNative("function Math.random(a)", scMathRandom, 0, SCRIPTVARLINK_BUILDINDEFAULT);
+	 tinyJS->addNative("function Math.rand(a)", scMathRandom, 0, SCRIPTVARLINK_BUILDINDEFAULT);
 
 
 // atan2, ceil, floor, random, round, 
